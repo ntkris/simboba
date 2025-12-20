@@ -841,6 +841,15 @@
             right: 0;
         }
 
+        #run-sidebar {
+            width: 560px;
+            right: -560px;
+        }
+
+        #run-sidebar.active {
+            right: 0;
+        }
+
         .sidebar-header {
             display: flex;
             justify-content: space-between;
@@ -1254,7 +1263,7 @@
     </div>
 
     <!-- Run Sidebar -->
-    <div class="case-sidebar" id="run-sidebar" style="width: 560px; right: -560px;">
+    <div class="case-sidebar" id="run-sidebar">
         <div class="sidebar-header">
             <span class="sidebar-title" id="sidebar-run-title">Run Details</span>
             <button class="sidebar-close" onclick="closeRunSidebar()">&times;</button>

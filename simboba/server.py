@@ -669,6 +669,45 @@ def create_app() -> FastAPI:
     class PlaygroundQuery(BaseModel):
         query: str
 
+    class PlaygroundSQL(BaseModel):
+        sql: str
+
+    @app.post("/api/playground/sql")
+    def playground_sql(data: PlaygroundSQL, db: Session = Depends(get_db)):
+        """Execute a SQL query directly (for hardcoded example queries)."""
+        from sqlalchemy import text
+
+        sql = data.sql.strip()
+
+        # Safety check: only allow SELECT queries
+        sql_upper = sql.upper().strip()
+        if not sql_upper.startswith("SELECT"):
+            return {
+                "success": False,
+                "error": "Only SELECT queries are allowed",
+                "sql": sql,
+                "results": []
+            }
+
+        try:
+            result = db.execute(text(sql))
+            columns = list(result.keys())
+            rows = [dict(zip(columns, row)) for row in result.fetchall()]
+
+            return {
+                "success": True,
+                "sql": sql,
+                "columns": columns,
+                "results": rows
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "sql": sql,
+                "results": []
+            }
+
     @app.post("/api/playground/query")
     def playground_query(data: PlaygroundQuery, db: Session = Depends(get_db)):
         """Execute a natural language query against the database."""

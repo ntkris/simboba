@@ -1291,7 +1291,14 @@ function showToast(message, isError = false) {
     }, 3000);
 }
 
-// Playground Page
+// Playground Page - Hardcoded example queries
+const EXAMPLE_QUERIES = {
+    'Show all datasets': 'SELECT id, name, description, created_at FROM datasets ORDER BY created_at DESC LIMIT 100',
+    'Find last 10 run results': 'SELECT er.id, er.passed, er.actual_output, er.reasoning, er.created_at, ec.name as case_name FROM eval_results er LEFT JOIN eval_cases ec ON er.case_id = ec.id ORDER BY er.created_at DESC LIMIT 10',
+    'Show runs with score below 50%': 'SELECT id, eval_name, score, passed, failed, total, started_at FROM eval_runs WHERE score < 50 ORDER BY started_at DESC LIMIT 100',
+    'Count cases per dataset': 'SELECT d.name, COUNT(ec.id) as case_count FROM datasets d LEFT JOIN eval_cases ec ON d.id = ec.dataset_id GROUP BY d.id ORDER BY case_count DESC',
+};
+
 function renderPlaygroundPage() {
     const container = document.getElementById('playground-content');
 
@@ -1316,10 +1323,10 @@ function renderPlaygroundPage() {
             </div>
             <div class="example-queries" style="display: flex; gap: 8px; flex-wrap: wrap;">
                 <span style="color: var(--zinc-500); font-size: 13px;">Examples:</span>
-                <button class="btn btn-ghost btn-sm" onclick="setPlaygroundQuery('Show all datasets')">Show all datasets</button>
-                <button class="btn btn-ghost btn-sm" onclick="setPlaygroundQuery('Find last 10 run results')">Last 10 run results</button>
-                <button class="btn btn-ghost btn-sm" onclick="setPlaygroundQuery('Show runs with score below 50%')">Runs below 50%</button>
-                <button class="btn btn-ghost btn-sm" onclick="setPlaygroundQuery('Count cases per dataset')">Cases per dataset</button>
+                <button class="btn btn-ghost btn-sm" onclick="runExampleQuery('Show all datasets')">Show all datasets</button>
+                <button class="btn btn-ghost btn-sm" onclick="runExampleQuery('Find last 10 run results')">Last 10 run results</button>
+                <button class="btn btn-ghost btn-sm" onclick="runExampleQuery('Show runs with score below 50%')">Runs below 50%</button>
+                <button class="btn btn-ghost btn-sm" onclick="runExampleQuery('Count cases per dataset')">Cases per dataset</button>
             </div>
         </div>
 
@@ -1327,9 +1334,55 @@ function renderPlaygroundPage() {
     `;
 }
 
-function setPlaygroundQuery(query) {
-    document.getElementById('playground-query').value = query;
-    runPlaygroundQuery();
+function runExampleQuery(name) {
+    const sql = EXAMPLE_QUERIES[name];
+    if (sql) {
+        document.getElementById('playground-query').value = name;
+        runPlaygroundSQL(sql);
+    }
+}
+
+async function runPlaygroundSQL(sql) {
+    const resultsDiv = document.getElementById('playground-results');
+
+    // Show loading
+    resultsDiv.innerHTML = `
+        <div class="loading" style="padding: 40px;">
+            <div class="spinner"></div>
+            Executing query...
+        </div>
+    `;
+
+    try {
+        const response = await fetch(`${API_BASE}/playground/sql`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sql })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            renderPlaygroundResults(result);
+        } else {
+            resultsDiv.innerHTML = `
+                <div style="background: var(--red-50); border: 1px solid var(--red-500); border-radius: 4px; padding: 16px;">
+                    <div style="color: #991b1b; font-weight: 500; margin-bottom: 8px;">Query failed</div>
+                    <div style="font-size: 13px; color: #991b1b;">${escapeHtml(result.error)}</div>
+                    <div style="margin-top: 12px;">
+                        <div class="detail-box-label">SQL</div>
+                        <pre class="mono" style="background: white; padding: 8px; border-radius: 4px; font-size: 12px; overflow-x: auto;">${escapeHtml(sql)}</pre>
+                    </div>
+                </div>
+            `;
+        }
+    } catch (e) {
+        resultsDiv.innerHTML = `
+            <div style="background: var(--red-50); border: 1px solid var(--red-500); border-radius: 4px; padding: 16px; color: #991b1b;">
+                <strong>Request failed:</strong> ${escapeHtml(e.message)}
+            </div>
+        `;
+    }
 }
 
 async function runPlaygroundQuery() {
