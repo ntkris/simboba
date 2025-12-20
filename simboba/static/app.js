@@ -68,6 +68,7 @@ function navigateTo(page) {
     if (page === 'dashboard') renderDashboard();
     if (page === 'datasets') renderDatasetsPage();
     if (page === 'runs') renderRunsPage();
+    if (page === 'playground') renderPlaygroundPage();
     if (page === 'settings') renderSettingsPage();
 
     // Reset detail views
@@ -1106,7 +1107,7 @@ async function startNewRun() {
         hideModal('modal-new-run');
         await loadRuns();
         showToast('Run completed');
-        viewRun(run.id);
+        openRunSidebar(run.id);
     } catch (e) {
         showToast(e.message, true);
     }
@@ -1288,4 +1289,162 @@ function showToast(message, isError = false) {
     setTimeout(() => {
         toast.className = 'toast';
     }, 3000);
+}
+
+// Playground Page
+function renderPlaygroundPage() {
+    const container = document.getElementById('playground-content');
+
+    container.innerHTML = `
+        <div class="page-header">
+            <div>
+                <h1 class="page-title">Playground</h1>
+                <p class="page-subtitle">Query your data using natural language</p>
+            </div>
+        </div>
+
+        <div class="playground-input-section" style="margin-bottom: 24px;">
+            <div class="input-group" style="margin-bottom: 12px;">
+                <label for="playground-query">Ask a question about your data</label>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="playground-query"
+                        placeholder="e.g., Find last 10 results of runs"
+                        style="flex: 1;"
+                        onkeydown="if(event.key === 'Enter') runPlaygroundQuery()">
+                    <button class="btn btn-primary" onclick="runPlaygroundQuery()">Run Query</button>
+                </div>
+            </div>
+            <div class="example-queries" style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <span style="color: var(--zinc-500); font-size: 13px;">Examples:</span>
+                <button class="btn btn-ghost btn-sm" onclick="setPlaygroundQuery('Show all datasets')">Show all datasets</button>
+                <button class="btn btn-ghost btn-sm" onclick="setPlaygroundQuery('Find last 10 run results')">Last 10 run results</button>
+                <button class="btn btn-ghost btn-sm" onclick="setPlaygroundQuery('Show runs with score below 50%')">Runs below 50%</button>
+                <button class="btn btn-ghost btn-sm" onclick="setPlaygroundQuery('Count cases per dataset')">Cases per dataset</button>
+            </div>
+        </div>
+
+        <div id="playground-results"></div>
+    `;
+}
+
+function setPlaygroundQuery(query) {
+    document.getElementById('playground-query').value = query;
+    runPlaygroundQuery();
+}
+
+async function runPlaygroundQuery() {
+    const query = document.getElementById('playground-query').value.trim();
+    const resultsDiv = document.getElementById('playground-results');
+
+    if (!query) {
+        showToast('Please enter a query', true);
+        return;
+    }
+
+    // Show loading
+    resultsDiv.innerHTML = `
+        <div class="loading" style="padding: 40px;">
+            <div class="spinner"></div>
+            Generating and executing query...
+        </div>
+    `;
+
+    try {
+        const response = await fetch(`${API_BASE}/playground/query`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            renderPlaygroundResults(result);
+        } else {
+            resultsDiv.innerHTML = `
+                <div style="background: var(--red-50); border: 1px solid var(--red-500); border-radius: 4px; padding: 16px;">
+                    <div style="color: #991b1b; font-weight: 500; margin-bottom: 8px;">Query failed</div>
+                    <div style="font-size: 13px; color: #991b1b;">${escapeHtml(result.error)}</div>
+                    ${result.sql ? `
+                        <div style="margin-top: 12px;">
+                            <div class="detail-box-label">Generated SQL</div>
+                            <pre class="mono" style="background: white; padding: 8px; border-radius: 4px; font-size: 12px; overflow-x: auto;">${escapeHtml(result.sql)}</pre>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+    } catch (e) {
+        resultsDiv.innerHTML = `
+            <div style="background: var(--red-50); border: 1px solid var(--red-500); border-radius: 4px; padding: 16px; color: #991b1b;">
+                <strong>Request failed:</strong> ${escapeHtml(e.message)}
+            </div>
+        `;
+    }
+}
+
+function renderPlaygroundResults(result) {
+    const resultsDiv = document.getElementById('playground-results');
+    const { sql, columns, results } = result;
+
+    if (results.length === 0) {
+        resultsDiv.innerHTML = `
+            <div style="margin-bottom: 16px;">
+                <div class="detail-box-label">Generated SQL</div>
+                <pre class="mono" style="background: var(--zinc-100); padding: 12px; border-radius: 4px; font-size: 12px; overflow-x: auto;">${escapeHtml(sql)}</pre>
+            </div>
+            <div class="empty-state" style="padding: 40px;">
+                <h3>No results</h3>
+                <p>The query returned no rows.</p>
+            </div>
+        `;
+        return;
+    }
+
+    // Build table
+    const tableHtml = `
+        <div style="margin-bottom: 16px;">
+            <div class="detail-box-label">Generated SQL</div>
+            <pre class="mono" style="background: var(--zinc-100); padding: 12px; border-radius: 4px; font-size: 12px; overflow-x: auto;">${escapeHtml(sql)}</pre>
+        </div>
+        <div style="margin-bottom: 8px; color: var(--zinc-500); font-size: 13px;">
+            ${results.length} row${results.length !== 1 ? 's' : ''} returned
+        </div>
+        <div class="table-container" style="overflow-x: auto;">
+            <table>
+                <thead>
+                    <tr>
+                        ${columns.map(col => `<th>${escapeHtml(col)}</th>`).join('')}
+                    </tr>
+                </thead>
+                <tbody>
+                    ${results.map(row => `
+                        <tr>
+                            ${columns.map(col => `<td class="mono" style="font-size: 12px;">${formatCellValue(row[col])}</td>`).join('')}
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+
+    resultsDiv.innerHTML = tableHtml;
+}
+
+function formatCellValue(value) {
+    if (value === null || value === undefined) {
+        return '<span style="color: var(--zinc-400);">null</span>';
+    }
+    if (typeof value === 'object') {
+        return escapeHtml(JSON.stringify(value));
+    }
+    if (typeof value === 'boolean') {
+        return value ? '<span style="color: var(--green-500);">true</span>' : '<span style="color: var(--red-500);">false</span>';
+    }
+    // Truncate long strings
+    const str = String(value);
+    if (str.length > 100) {
+        return escapeHtml(str.substring(0, 100) + '...');
+    }
+    return escapeHtml(str);
 }

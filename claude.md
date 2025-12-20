@@ -108,7 +108,8 @@ boba config                                      # Show current configuration
 boba serve [--config evals.py] [--port 8787]     # Start web UI
 boba test [--eval name] [-m "message"]           # Test connection to your agent
 boba evals                                       # List loaded evals and show errors
-boba run --config evals.py --dataset name        # Run evals headlessly
+boba run --dataset name [--eval name]            # Run evals headlessly
+boba setup                                       # Run setup script, print credentials
 boba export --dataset name -o file.json          # Export dataset
 boba import -i file.json                         # Import dataset
 boba datasets                                    # List all datasets
@@ -145,6 +146,51 @@ service: api
 runtime: local           # or "docker-compose"
 service: api             # Docker Compose service name (if docker-compose)
 ```
+
+### Setup Script
+
+The `evals/setup.py` file creates test fixtures before running evals. Use it to set up test users, projects, or any data your evals need.
+
+**Structure:**
+```python
+# evals/setup.py
+
+def setup():
+    """Create test fixtures, return credentials dict."""
+    # Create test data using your app's models/APIs
+    user = create_user(email="eval@test.com")
+    project = create_project(user_id=user.id)
+
+    return {
+        "user_id": user.id,
+        "project_id": project.id,
+    }
+
+def teardown(ctx: dict):
+    """Optional: clean up test data."""
+    delete_user(ctx["user_id"])
+```
+
+**Run setup:**
+```bash
+$ boba setup
+
+Running setup...
+
+Setup complete!
+
+Credentials:
+  user_id: 123
+  project_id: 456
+
+JSON:
+{
+  "user_id": 123,
+  "project_id": 456
+}
+```
+
+**Using credentials in evals:** Import your setup module or hardcode the IDs after running setup once.
 
 ## Design System
 

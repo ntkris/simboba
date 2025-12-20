@@ -664,6 +664,134 @@ def create_app() -> FastAPI:
             Settings.set(db, key, value)
         return Settings.get_all(db)
 
+    # --- Playground Routes ---
+
+    class PlaygroundQuery(BaseModel):
+        query: str
+
+    @app.post("/api/playground/query")
+    def playground_query(data: PlaygroundQuery, db: Session = Depends(get_db)):
+        """Execute a natural language query against the database."""
+        from sqlalchemy import text
+
+        # Get the model from settings
+        model = Settings.get(db, "model")
+
+        # Build the prompt for SQL generation
+        schema_description = """
+Database Schema:
+
+TABLE datasets (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR(255) UNIQUE,
+    description TEXT,
+    created_at DATETIME,
+    updated_at DATETIME
+)
+
+TABLE eval_cases (
+    id INTEGER PRIMARY KEY,
+    dataset_id INTEGER REFERENCES datasets(id),
+    name VARCHAR(255),
+    inputs JSON,  -- List of {role, message, attachments}
+    expected_outcome TEXT,
+    expected_source JSON,  -- {file, page, excerpt}
+    created_at DATETIME,
+    updated_at DATETIME
+)
+
+TABLE eval_runs (
+    id INTEGER PRIMARY KEY,
+    dataset_id INTEGER REFERENCES datasets(id),
+    eval_name VARCHAR(255),
+    status VARCHAR(50),  -- pending, running, completed, failed
+    passed INTEGER,
+    failed INTEGER,
+    total INTEGER,
+    score FLOAT,  -- percentage 0-100
+    error_message TEXT,
+    started_at DATETIME,
+    completed_at DATETIME
+)
+
+TABLE eval_results (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER REFERENCES eval_runs(id),
+    case_id INTEGER REFERENCES eval_cases(id),
+    passed BOOLEAN,
+    actual_output TEXT,
+    judgment TEXT,
+    reasoning TEXT,
+    error_message TEXT,
+    execution_time_ms INTEGER,
+    created_at DATETIME
+)
+
+TABLE settings (
+    key VARCHAR(255) PRIMARY KEY,
+    value TEXT
+)
+"""
+
+        prompt = f"""You are a SQL query generator. Convert the user's natural language query into a SQLite SELECT query.
+
+{schema_description}
+
+Rules:
+1. ONLY generate SELECT queries. Never generate INSERT, UPDATE, DELETE, DROP, or any other modifying queries.
+2. Return ONLY the SQL query, no explanations.
+3. Use proper SQLite syntax.
+4. Limit results to 100 rows maximum unless the user specifies otherwise.
+5. For recent/latest queries, order by appropriate datetime columns DESC.
+
+User query: {data.query}
+
+SQL query:"""
+
+        try:
+            client = LLMClient(model=model)
+            response = client.generate(prompt)
+            sql = response.strip()
+
+            # Clean up the SQL (remove markdown code blocks if present)
+            if sql.startswith("```sql"):
+                sql = sql[6:]
+            elif sql.startswith("```"):
+                sql = sql[3:]
+            if sql.endswith("```"):
+                sql = sql[:-3]
+            sql = sql.strip()
+
+            # Safety check: only allow SELECT queries
+            sql_upper = sql.upper().strip()
+            if not sql_upper.startswith("SELECT"):
+                return {
+                    "success": False,
+                    "error": "Only SELECT queries are allowed",
+                    "sql": sql,
+                    "results": []
+                }
+
+            # Execute the query
+            result = db.execute(text(sql))
+            columns = list(result.keys())
+            rows = [dict(zip(columns, row)) for row in result.fetchall()]
+
+            return {
+                "success": True,
+                "sql": sql,
+                "columns": columns,
+                "results": rows
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "sql": sql if 'sql' in dir() else None,
+                "results": []
+            }
+
     # Serve static files
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

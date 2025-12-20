@@ -109,6 +109,97 @@ def inside_container() -> bool:
     return False
 
 
+def _check_docker_available() -> tuple[bool, str]:
+    """Check if docker compose is available."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "version"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0, ""
+    except FileNotFoundError:
+        return False, "Docker is not installed or not in PATH"
+
+
+def _check_container_running(service: str) -> tuple[bool, str]:
+    """Check if the container is running."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "ps", "--status=running", "--format", "{{.Service}}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return False, "Could not check container status"
+
+        running_services = result.stdout.strip().split("\n")
+        if service in running_services:
+            return True, ""
+        return False, f"Service '{service}' is not running"
+    except FileNotFoundError:
+        return False, "Docker is not installed"
+
+
+def _print_docker_error(message: str, service: str, hint: str = None):
+    """Print a formatted Docker error message."""
+    import click
+    click.echo("")
+    click.echo(click.style(f"Error: {message}", fg="red"))
+    click.echo("")
+
+    if hint:
+        click.echo(hint)
+        click.echo("")
+
+
+def _print_simboba_not_installed_error(service: str):
+    """Print helpful error when simboba is not installed in container."""
+    import click
+    click.echo("")
+    click.echo(click.style(f"Error: 'boba' command not found in container '{service}'", fg="red"))
+    click.echo("")
+    click.echo("simboba needs to be installed inside your container.")
+    click.echo("")
+    click.echo(click.style("To fix:", fg="yellow"))
+    click.echo("")
+    click.echo("  1. Add simboba to your dependencies:")
+    click.echo("")
+    click.echo(click.style("     # requirements.txt", fg="bright_black"))
+    click.echo("     simboba")
+    click.echo("")
+    click.echo(click.style("     # or Pipfile", fg="bright_black"))
+    click.echo("     simboba = \"*\"")
+    click.echo("")
+    click.echo(click.style("     # or pyproject.toml", fg="bright_black"))
+    click.echo("     dependencies = [\"simboba\"]")
+    click.echo("")
+    click.echo("  2. Rebuild your container:")
+    click.echo(click.style("     docker compose build", fg="cyan"))
+    click.echo("")
+    click.echo("  3. Try again:")
+    click.echo(click.style("     boba serve", fg="cyan"))
+    click.echo("")
+
+
+def _print_container_not_running_error(service: str):
+    """Print helpful error when container is not running."""
+    import click
+    click.echo("")
+    click.echo(click.style(f"Error: Container '{service}' is not running", fg="red"))
+    click.echo("")
+    click.echo(click.style("To fix:", fg="yellow"))
+    click.echo("")
+    click.echo("  Start your containers:")
+    click.echo(click.style(f"     docker compose up -d", fg="cyan"))
+    click.echo("")
+    click.echo("  Then try again:")
+    click.echo(click.style("     boba serve", fg="cyan"))
+    click.echo("")
+
+
 def maybe_exec_in_docker() -> None:
     """If configured for Docker and not already in container, exec into Docker.
 
@@ -116,6 +207,8 @@ def maybe_exec_in_docker() -> None:
     is configured and we're not already inside a container, it will exec
     into the Docker container, replacing the current process.
     """
+    import subprocess
+
     # Skip if we're already in a container
     if inside_container():
         return
@@ -136,9 +229,42 @@ def maybe_exec_in_docker() -> None:
     if not config.service:
         return
 
-    # Build the docker compose exec command
-    # We need to pass through all arguments
-    args = ["docker", "compose", "exec", config.service, "boba"] + sys.argv[1:]
+    service = config.service
 
-    # Replace current process with docker exec
-    os.execvp("docker", args)
+    # Check if docker is available
+    docker_ok, docker_err = _check_docker_available()
+    if not docker_ok:
+        _print_docker_error(docker_err, service)
+        sys.exit(1)
+
+    # Check if container is running
+    container_ok, container_err = _check_container_running(service)
+    if not container_ok:
+        _print_container_not_running_error(service)
+        sys.exit(1)
+
+    # Build the docker compose exec command
+    cmd_args = sys.argv[1:]
+
+    # For 'serve' command in Docker, ensure it binds to 0.0.0.0 so it's accessible from host
+    if len(cmd_args) >= 1 and cmd_args[0] == "serve":
+        if "--host" not in cmd_args and "-h" not in cmd_args:
+            cmd_args = cmd_args + ["--host", "0.0.0.0"]
+
+    args = ["docker", "compose", "exec", service, "boba"] + cmd_args
+
+    # Run the command (not exec, so we can catch errors)
+    try:
+        result = subprocess.run(args)
+
+        # If the command failed, check if it's because boba isn't installed
+        if result.returncode == 127:  # Command not found
+            _print_simboba_not_installed_error(service)
+            sys.exit(1)
+
+        sys.exit(result.returncode)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:
+        _print_docker_error(str(e), service)
+        sys.exit(1)

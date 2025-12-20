@@ -168,6 +168,53 @@ my_eval = Eval(
 
     (evals_dir / "example.py").write_text(template)
 
+    # Create setup.py template
+    setup_template = '''"""Setup script for eval test fixtures.
+
+This script creates any test data needed before running evals.
+Run with: boba setup
+
+The setup() function should return a dict of credentials/context
+that will be printed to the terminal and can be used in your evals.
+"""
+
+
+def setup():
+    """Create test fixtures and return credentials.
+
+    Returns:
+        dict: Credentials and context for evals. Example:
+            {
+                "user_id": 123,
+                "project_id": 456,
+                "api_token": "test-token-xxx",
+            }
+    """
+    # Example: Create a test user
+    # user = create_user(email="eval-test@example.com")
+    #
+    # Example: Create a test project
+    # project = create_project(user_id=user.id, name="Eval Test Project")
+    #
+    # Return credentials for use in evals
+    return {
+        "message": "Edit setup.py to create your test fixtures",
+    }
+
+
+def teardown(ctx: dict):
+    """Optional: Clean up test fixtures.
+
+    Args:
+        ctx: The dict returned by setup()
+    """
+    # Example: Delete test user
+    # delete_user(ctx["user_id"])
+    pass
+'''
+
+    (evals_dir / "setup.py").write_text(setup_template)
+
     # Copy README from package
     import simboba
     package_dir = Path(simboba.__file__).parent.parent
@@ -186,11 +233,32 @@ my_eval = Eval(
     click.echo(click.style("✓ Created evals/ folder", fg="green"))
     click.echo(f"  - {CONFIG_FILENAME} (runtime: {runtime})")
     click.echo("  - example.py")
+    click.echo("  - setup.py")
     click.echo("  - README.md")
     click.echo("")
-    click.echo("Next steps:")
-    click.echo("  1. Edit evals/example.py to connect your agent")
-    click.echo("  2. Run: boba serve")
+
+    if runtime == "docker-compose":
+        click.echo("Next steps:")
+        click.echo("")
+        click.echo("  1. Add simboba to your container's dependencies:")
+        click.echo(click.style("     # requirements.txt, Pipfile, or pyproject.toml", fg="bright_black"))
+        click.echo("     simboba")
+        click.echo("")
+        click.echo("  2. Expose port 8787 in docker-compose.yml:")
+        click.echo(click.style(f"     services:", fg="bright_black"))
+        click.echo(click.style(f"       {service}:", fg="bright_black"))
+        click.echo(click.style(f"         ports:", fg="bright_black"))
+        click.echo(click.style(f"           - \"8787:8787\"", fg="bright_black"))
+        click.echo("")
+        click.echo("  3. Rebuild and start:")
+        click.echo(click.style("     docker compose build && docker compose up -d", fg="cyan"))
+        click.echo("")
+        click.echo("  4. Run boba:")
+        click.echo(click.style("     boba serve", fg="cyan"))
+    else:
+        click.echo("Next steps:")
+        click.echo("  1. Edit evals/example.py to connect your agent")
+        click.echo("  2. Run: boba serve")
 
 
 @main.command()
@@ -269,26 +337,56 @@ def serve(host: str, port: int, config_path: str, reload: bool):
 
 
 @main.command()
-@click.option("--config", "-c", "config_path", required=True, help="Path to evals.py config file")
+@click.option("--config", "-c", "config_path", help="Path to eval config file or folder (default: ./evals)")
 @click.option("--dataset", "-d", required=True, help="Dataset name to run evals against")
 @click.option("--eval", "-e", "eval_name", help="Specific eval to run (default: all)")
 @click.option("--no-judge", is_flag=True, help="Skip LLM judging, just run the functions")
 def run(config_path: str, dataset: str, eval_name: str, no_judge: bool):
     """Run evals headlessly (for CI)."""
+    from pathlib import Path
     from simboba.database import init_db, get_session_factory
     from simboba.models import Dataset
-    from simboba.runner import load_config, run_eval
+    from simboba.runner import load_config, load_evals_folder, run_eval
 
     init_db()
     Session = get_session_factory()
     db = Session()
 
     try:
-        # Load config
-        try:
-            evals = load_config(config_path)
-        except Exception as e:
-            click.echo(f"Error loading config: {e}", err=True)
+        # Load config - try specified path, then default evals/ folder
+        evals = None
+        if config_path:
+            path = Path(config_path)
+            try:
+                if path.is_dir():
+                    result = load_evals_folder(config_path, return_details=True)
+                    evals = result.evals
+                    if result.failed:
+                        for filename, error in result.failed:
+                            click.echo(click.style(f"  ✗ {filename}", fg="red") + f": {error}")
+                else:
+                    evals = load_config(config_path)
+            except Exception as e:
+                click.echo(f"Error loading config: {e}", err=True)
+                raise SystemExit(1)
+        else:
+            # Try default evals/ folder
+            if Path("evals").is_dir():
+                try:
+                    result = load_evals_folder("evals", return_details=True)
+                    evals = result.evals
+                    if result.failed:
+                        for filename, error in result.failed:
+                            click.echo(click.style(f"  ✗ {filename}", fg="red") + f": {error}")
+                except Exception as e:
+                    click.echo(f"Error loading evals: {e}", err=True)
+                    raise SystemExit(1)
+            else:
+                click.echo("Error: No evals/ folder found. Run 'boba init' first or specify --config.", err=True)
+                raise SystemExit(1)
+
+        if not evals:
+            click.echo("Error: No evals loaded.", err=True)
             raise SystemExit(1)
 
         # Get dataset
@@ -621,6 +719,61 @@ def test(eval_name: str, message: str):
         elapsed = time.time() - start_time
         click.echo(click.style(f"Error ({elapsed:.2f}s): {e}", fg="red"), err=True)
         raise SystemExit(1)
+
+
+@main.command()
+def setup():
+    """Run setup script and print credentials.
+
+    Executes evals/setup.py and prints the returned credentials.
+    Use this to create test fixtures before running evals.
+    """
+    from pathlib import Path
+    import importlib.util
+    import json
+
+    setup_path = Path("evals/setup.py")
+    if not setup_path.exists():
+        click.echo("No evals/setup.py found. Run 'boba init' first.", err=True)
+        raise SystemExit(1)
+
+    # Load the setup module
+    try:
+        spec = importlib.util.spec_from_file_location("setup", setup_path)
+        setup_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(setup_module)
+    except Exception as e:
+        click.echo(click.style(f"Error loading setup.py: {e}", fg="red"), err=True)
+        raise SystemExit(1)
+
+    if not hasattr(setup_module, "setup"):
+        click.echo("setup.py must define a setup() function", err=True)
+        raise SystemExit(1)
+
+    # Run setup
+    click.echo("Running setup...")
+    try:
+        ctx = setup_module.setup()
+    except Exception as e:
+        click.echo(click.style(f"Setup failed: {e}", fg="red"), err=True)
+        raise SystemExit(1)
+
+    if not isinstance(ctx, dict):
+        click.echo("setup() must return a dict", err=True)
+        raise SystemExit(1)
+
+    # Print credentials
+    click.echo("")
+    click.echo(click.style("Setup complete!", fg="green"))
+    click.echo("")
+    click.echo("Credentials:")
+    for key, value in ctx.items():
+        click.echo(f"  {key}: {value}")
+
+    # Also print as JSON for easy copying
+    click.echo("")
+    click.echo("JSON:")
+    click.echo(click.style(json.dumps(ctx, indent=2, default=str), fg="cyan"))
 
 
 @main.command()
