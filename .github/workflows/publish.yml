@@ -1,6 +1,9 @@
 name: Publish to PyPI
 
 on:
+  push:
+    tags:
+      - 'v*'  # Triggers on v0.1.0, v1.0.0, etc.
   release:
     types: [published]
 
@@ -30,7 +33,6 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       id-token: write  # Required for trusted publishing
     steps:
