@@ -73,7 +73,7 @@ class EvalRun(Base):
     __tablename__ = "eval_runs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    dataset_id: Mapped[int] = mapped_column(ForeignKey("datasets.id"), index=True)
+    dataset_id: Mapped[Optional[int]] = mapped_column(ForeignKey("datasets.id"), index=True, nullable=True)
     eval_name: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(50), default="pending")  # pending, running, completed, failed
     passed: Mapped[int] = mapped_column(default=0)
@@ -84,7 +84,7 @@ class EvalRun(Base):
     started_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 
-    dataset: Mapped["Dataset"] = relationship("Dataset")
+    dataset: Mapped[Optional["Dataset"]] = relationship("Dataset")
     results: Mapped[list["EvalResult"]] = relationship(
         "EvalResult", back_populates="run", cascade="all, delete-orphan"
     )
@@ -93,6 +93,7 @@ class EvalRun(Base):
         return {
             "id": self.id,
             "dataset_id": self.dataset_id,
+            "dataset_name": self.dataset.name if self.dataset else None,
             "eval_name": self.eval_name,
             "status": self.status,
             "passed": self.passed,
@@ -153,7 +154,10 @@ class EvalResult(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("eval_runs.id"), index=True)
-    case_id: Mapped[int] = mapped_column(ForeignKey("eval_cases.id"), index=True)
+    case_id: Mapped[Optional[int]] = mapped_column(ForeignKey("eval_cases.id"), index=True, nullable=True)
+    # For ad-hoc runs (when case_id is null), store inputs/expected inline
+    inputs: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    expected_outcome: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     passed: Mapped[bool] = mapped_column(Boolean, default=False)
     actual_output: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     judgment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -163,9 +167,21 @@ class EvalResult(Base):
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
     run: Mapped["EvalRun"] = relationship("EvalRun", back_populates="results")
-    case: Mapped["EvalCase"] = relationship("EvalCase")
+    case: Mapped[Optional["EvalCase"]] = relationship("EvalCase")
 
     def to_dict(self) -> dict:
+        # For ad-hoc results, build case data from inline fields
+        if self.case:
+            case_data = self.case.to_dict()
+        elif self.inputs is not None:
+            case_data = {
+                "id": None,
+                "inputs": self.inputs,
+                "expected_outcome": self.expected_outcome or "",
+            }
+        else:
+            case_data = None
+
         return {
             "id": self.id,
             "run_id": self.run_id,
@@ -177,5 +193,5 @@ class EvalResult(Base):
             "error_message": self.error_message,
             "execution_time_ms": self.execution_time_ms,
             "created_at": self.created_at.isoformat(),
-            "case": self.case.to_dict() if self.case else None,
+            "case": case_data,
         }

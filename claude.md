@@ -1,50 +1,71 @@
 # simboba
 
-A lightweight tool for generating annotated eval datasets and running LLM-as-judge evaluations.
+Lightweight eval tracking with LLM-as-judge. Users write Python scripts to run evals, results are tracked in SQLite and viewable in a web UI.
 
 ## Quick Start
 
 ```bash
-# Install dependencies
 pip install -e .
-
-# Start the web UI
-simboba serve
-
-# With eval config
-simboba serve --config evals.py
+boba init                    # Create evals/ folder
+python evals/test_chat.py    # Run evals
+boba serve                   # View results
 ```
 
 ## Project Structure
 
 ```
 simboba/
-├── simboba/               # Main package
-│   ├── __init__.py       # Exports Eval class
-│   ├── cli.py            # Click CLI commands
-│   ├── config.py         # Configuration (.boba.yaml) handling
+├── simboba/
+│   ├── __init__.py       # Exports Boba class
+│   ├── boba.py           # Core Boba class (eval, run methods)
+│   ├── cli.py            # Click CLI (init, setup, serve, datasets, generate, reset)
+│   ├── config.py         # Configuration (.boba.yaml) and Docker exec
 │   ├── database.py       # SQLite/SQLAlchemy setup
-│   ├── models.py         # Dataset, EvalCase, EvalRun, EvalResult
+│   ├── models.py         # Dataset, EvalCase, EvalRun, EvalResult, Settings
 │   ├── server.py         # FastAPI REST API
-│   ├── runner.py         # Eval execution logic
 │   ├── judge.py          # LLM judge implementation
-│   └── static/           # Web UI
-│       ├── index.html    # Main page structure + CSS
-│       └── app.js        # Frontend JavaScript
+│   ├── prompts/          # LLM prompts for generation and judging
+│   ├── utils/            # LLM client utilities
+│   ├── samples/          # Template files copied by `boba init`
+│   │   ├── setup.py      # Test fixtures template
+│   │   └── test_chat.py  # Eval script template
+│   └── static/           # Web UI (index.html, app.js)
 ├── tests/
 │   ├── conftest.py       # Pytest fixtures
-│   └── test_core_flows.py # Core functionality tests
-├── pyproject.toml        # Package config
-└── REQUIREMENTS.md       # Product requirements
+│   └── test_core_flows.py
+└── pyproject.toml
 ```
 
 ## Architecture
 
+### Core Class: Boba
+
+```python
+from simboba import Boba
+
+boba = Boba()
+
+# Single eval - judges output against expected
+result = boba.eval(
+    input="Hello",
+    output="Hi there!",
+    expected="Should greet the user",
+)
+# Returns: {"passed": bool, "reasoning": str, "run_id": int}
+
+# Dataset eval - runs agent against all cases in a dataset
+result = boba.run(
+    agent=my_agent_fn,  # Callable[[str], str]
+    dataset="my-dataset",
+)
+# Returns: {"passed": int, "failed": int, "total": int, "score": float, "run_id": int}
+```
+
 ### Data Model
 
 - **Dataset**: Named collection of eval cases
-- **EvalCase**: Single test case with inputs, expected outcome, and optional source reference
-- **EvalRun**: One execution of an eval against a dataset
+- **EvalCase**: Test case with inputs, expected outcome, optional source reference
+- **EvalRun**: One execution (from `boba.eval()` or `boba.run()`)
 - **EvalResult**: Per-case result with actual output, judgment, reasoning
 
 ### EvalCase Structure
@@ -56,28 +77,25 @@ simboba/
     ],
     "expected_outcome": "Agent should...",
     "expected_source": {        # optional - for verification
-        "file": "doc.pdf",      # which file
-        "page": 12,             # which page
-        "excerpt": "..."        # optional snippet
+        "file": "doc.pdf",
+        "page": 12,
+        "excerpt": "..."
     }
 }
 ```
 
-### Eval Class Pattern
+### CLI Commands
 
-```python
-from simboba import Eval
-
-def my_function(messages):
-    return "response"
-
-my_eval = Eval(
-    name="my-eval",
-    fn=my_function,
-    transform_inputs=lambda msgs: {"messages": msgs},  # optional
-    transform_output=lambda r: str(r),                 # optional
-)
-```
+| Command | Description |
+|---------|-------------|
+| `boba init` | Create `evals/` folder with templates |
+| `boba init --docker` | Quick setup for Docker Compose |
+| `boba init --local` | Quick setup for local Python |
+| `boba setup` | Print AI prompt for configuring eval scripts |
+| `boba serve` | Start web UI at localhost:8787 |
+| `boba datasets` | List all datasets |
+| `boba generate "desc"` | Generate dataset from description |
+| `boba reset` | Delete database |
 
 ### API Endpoints
 
@@ -89,151 +107,27 @@ my_eval = Eval(
 | `/api/datasets/import` | POST | Import dataset from JSON |
 | `/api/cases` | GET, POST | List/create cases |
 | `/api/cases/{id}` | GET, PUT, DELETE | CRUD for single case |
+| `/api/cases/bulk` | POST | Bulk create cases |
 | `/api/generate` | POST | Generate synthetic cases |
-| `/api/generate/with-files` | POST | Generate cases from PDF files (multipart form) |
+| `/api/generate/with-files` | POST | Generate from PDF files |
 | `/api/generate/accept` | POST | Accept generated cases |
-| `/api/evals` | GET | List loaded evals |
-| `/api/evals/errors` | GET | List eval import errors |
-| `/api/evals/{name}/test` | POST | Test connection to an eval |
-| `/api/runs` | GET, POST | List runs / start new run |
+| `/api/runs` | GET | List runs |
 | `/api/runs/{id}` | GET, DELETE | Get/delete run |
+| `/api/settings` | GET, PUT | Get/update settings |
 
-### CLI Commands
-
-```bash
-boba init                                        # Interactive setup wizard
-boba init --docker                               # Quick setup for Docker Compose
-boba init --local                                # Quick setup for local Python
-boba config                                      # Show current configuration
-boba serve [--config evals.py] [--port 8787]     # Start web UI
-boba test [--eval name] [-m "message"]           # Test connection to your agent
-boba evals                                       # List loaded evals and show errors
-boba run --dataset name [--eval name]            # Run evals headlessly
-boba setup                                       # Run setup script, print credentials
-boba export --dataset name -o file.json          # Export dataset
-boba import -i file.json                         # Import dataset
-boba datasets                                    # List all datasets
-boba generate "description"                      # Generate dataset from CLI
-boba reset                                       # Delete database (all data)
-```
+Note: Runs are created by the Boba class in Python scripts, not via API.
 
 ### Docker Integration
 
-Boba supports transparent Docker Compose integration. When configured for Docker, all commands automatically exec into your container.
+When configured for Docker (`boba init --docker`), commands auto-exec into the container:
 
-**Setup:**
-```bash
-$ boba init
-? How do you run your app? [local / docker-compose]
-> docker-compose
-? Docker Compose service name [api]
-> api
-```
-
-This creates `evals/.boba.yaml`:
 ```yaml
+# evals/.boba.yaml
 runtime: docker-compose
 service: api
 ```
 
-**How it works:**
-- `boba serve`, `boba generate`, etc. automatically run inside your container
-- The `init` command always runs locally (to create the config)
-- Set `BOBA_NO_DOCKER=1` to bypass Docker exec temporarily
-
-**Configuration file:** `evals/.boba.yaml`
-```yaml
-runtime: local           # or "docker-compose"
-service: api             # Docker Compose service name (if docker-compose)
-```
-
-### Setup Script
-
-The `evals/setup.py` file creates test fixtures before running evals. Use it to set up test users, projects, or any data your evals need.
-
-**Structure:**
-```python
-# evals/setup.py
-
-def setup():
-    """Create test fixtures, return credentials dict."""
-    # Create test data using your app's models/APIs
-    user = create_user(email="eval@test.com")
-    project = create_project(user_id=user.id)
-
-    return {
-        "user_id": user.id,
-        "project_id": project.id,
-    }
-
-def teardown(ctx: dict):
-    """Optional: clean up test data."""
-    delete_user(ctx["user_id"])
-```
-
-**Run setup:**
-```bash
-$ boba setup
-
-Running setup...
-
-Setup complete!
-
-Credentials:
-  user_id: 123
-  project_id: 456
-
-JSON:
-{
-  "user_id": 123,
-  "project_id": 456
-}
-```
-
-**Using credentials in evals:** Import your setup module or hardcode the IDs after running setup once.
-
-## Design System
-
-### Colors (Tailwind Zinc + Taro accent)
-
-| Token | Value | Usage |
-|-------|-------|-------|
-| `--zinc-50` | #fafafa | Page background |
-| `--zinc-100` | #f4f4f5 | Subtle backgrounds |
-| `--zinc-200` | #e4e4e7 | Borders |
-| `--zinc-400` | #a1a1aa | Muted text, icons |
-| `--zinc-500` | #71717a | Secondary text |
-| `--zinc-600` | #52525b | Labels |
-| `--zinc-900` | #18181b | Primary text |
-| `--taro` | #8B7BA5 | Primary accent (buttons, links, active states) |
-| `--taro-dark` | #7A6B94 | Hover state |
-| `--taro-light` | #F4F2F7 | Active item backgrounds |
-| `--green-500` | #22c55e | Pass states |
-| `--red-500` | #ef4444 | Fail/error states |
-
-### Typography
-
-- **Body/UI**: DM Sans (400, 500, 600)
-- **Data/Code**: JetBrains Mono (400, 500)
-- Use `.mono` class for numeric data, scores, counts
-
-### Components
-
-- **Buttons**: `.btn`, `.btn-primary`, `.btn-secondary`, `.btn-danger`, `.btn-sm`
-- **Forms**: `.input-group` wrapper with `label`, `input`/`textarea`/`select`
-- **Tabs**: `.tabs` container with `.tab` items
-- **Cards**: `.case-item`, `.run-item`, `.result-item`
-- **Status**: `.status-pearl.pass`, `.status-pearl.fail`, `.status-pearl.running`
-- **Badges**: `.result-badge.pass`, `.result-badge.fail`
-- **Empty states**: `.empty-state` centered container
-
-### Design Principles
-
-1. **Sharp corners** - max 4px border-radius
-2. **Minimal** - zinc grays, single taro accent
-3. **Status pearls** - small colored dots as visual motif
-4. **Monospace data** - scores, counts, timestamps use JetBrains Mono
-5. **Dense but readable** - 14px base, compact spacing
+Set `BOBA_NO_DOCKER=1` to bypass.
 
 ## Development
 
@@ -243,77 +137,63 @@ JSON:
 pytest tests/ -v
 ```
 
-### Key Test Patterns
+### Test Coverage
 
-Tests use an isolated in-memory SQLite database via the `client` fixture in `conftest.py`. This ensures each test runs independently.
+- `TestBoba`: `eval()`, `run()` methods
+- `TestDatasetManagement`: Dataset CRUD
+- `TestCaseManagement`: Case CRUD
+- `TestRunsAPI`: List/delete runs
+- `TestJudge`: Simple keyword judge
+- `TestUIServing`: Health, index endpoints
+
+### Key Files for Common Changes
+
+| Task | Files |
+|------|-------|
+| Change Boba API | `boba.py`, `__init__.py` |
+| Add CLI command | `cli.py` |
+| Add API endpoint | `server.py` |
+| Change data model | `models.py`, `database.py` |
+| Update templates | `samples/setup.py`, `samples/test_chat.py` |
+| Change judging | `judge.py`, `prompts/judge.py` |
+| Update UI | `static/index.html`, `static/app.js` |
 
 ### Adding New Features
 
-1. Add model to `models.py` if needed
-2. Add API endpoint to `server.py`
-3. Update UI in `app.js` (render functions)
-4. Add styles to `index.html` if needed
-5. Write tests in `test_core_flows.py`
+1. Update model in `models.py` if needed
+2. Add API endpoint in `server.py`
+3. Update `boba.py` if it affects the Python API
+4. Update UI in `static/app.js`
+5. Add tests in `test_core_flows.py`
+6. Update README.md and CLAUDE.md
 
-### Common Modifications
+## Design System
 
-**Adding a new eval option:**
-1. Update `Eval` class in `eval.py`
-2. Update `run_case` in `runner.py` to handle it
+### Colors (Tailwind Zinc + Taro accent)
 
-**Adding a new API field:**
-1. Update Pydantic models in `server.py`
-2. Update SQLAlchemy model in `models.py`
-3. Update `to_dict()` method
+| Token | Usage |
+|-------|-------|
+| `--zinc-50` | Page background |
+| `--zinc-200` | Borders |
+| `--zinc-900` | Primary text |
+| `--taro` (#8B7BA5) | Primary accent |
+| `--green-500` | Pass states |
+| `--red-500` | Fail states |
 
-**Changing UI styling:**
-1. CSS variables and classes are in `index.html`
-2. Dynamic elements use inline styles with `var(--token)` in `app.js`
+### Principles
 
-## File-Based Generation
-
-Generate test cases from PDF documents:
-
-1. **Upload PDFs** in the Generate tab (drag & drop or click to browse)
-2. **Describe your agent** - e.g., "A document Q&A assistant"
-3. **Generate** - Claude reads the PDFs and creates test cases based on actual content
-4. **Review** - each generated case includes:
-   - Question about the document
-   - Expected outcome
-   - Source reference (file + page number) for quick verification
-
-The source reference (`expected_source`) helps you verify that the expected outcome is correct without opening the PDF.
-
-```python
-# Example generated case
-{
-    "name": "Cancellation policy question",
-    "inputs": [{"role": "user", "message": "Can I cancel early?", "attachments": [{"file": "contract.pdf"}]}],
-    "expected_outcome": "Agent should explain the 30-day notice requirement",
-    "expected_source": {"file": "contract.pdf", "page": 12, "excerpt": "30 days written notice required"}
-}
-```
+- Sharp corners (max 4px border-radius)
+- Minimal - zinc grays, single taro accent
+- Monospace for data (scores, counts, timestamps)
 
 ## Judge Configuration
 
 The LLM judge uses Claude by default. Set `ANTHROPIC_API_KEY` environment variable.
 
 ```python
-# Custom judge function signature
+# Judge function signature
 def judge(inputs, expected, actual) -> tuple[bool, str]:
     """Returns (passed, reasoning)"""
-    pass
 ```
 
 A simple keyword-matching fallback (`create_simple_judge()`) is used when no API key is available.
-
-## Documentation
-
-**IMPORTANT: Keep README.md updated!**
-
-When adding new features (CLI commands, API endpoints, UI features):
-1. Update the Commands table in README.md
-2. Add usage examples if the feature is user-facing
-3. Update this CLAUDE.md file with technical details
-
-The README.md is copied to users' `evals/` folders on `boba init` and serves as documentation for AI tools helping users write eval configs.

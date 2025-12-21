@@ -204,132 +204,82 @@ class TestExportImport:
         assert data["case_count"] == 1
 
 
-class TestEvalClass:
-    """Test the Eval class for running evaluations."""
+class TestBoba:
+    """Test the Boba class for running evaluations."""
 
-    def test_eval_basic_run(self):
-        from simboba import Eval
+    def test_eval_single(self, client):
+        """Test single eval with Boba class."""
+        from simboba import Boba
 
-        def my_function(messages):
-            return f"Received {len(messages)} messages"
-
-        eval_config = Eval(name="test-eval", fn=my_function)
-
-        result = eval_config.run(
-            [
-                {"role": "user", "message": "Hello"},
-                {"role": "assistant", "message": "Hi"},
-            ]
-        )
-        assert result == "Received 2 messages"
-
-    def test_eval_with_transforms(self):
-        from simboba import Eval
-
-        def my_function(text):
-            return {"response": text.upper()}
-
-        def transform_inputs(messages):
-            return {"text": messages[0]["message"]}
-
-        def transform_output(result):
-            return result["response"]
-
-        eval_config = Eval(
-            name="transform-eval",
-            fn=my_function,
-            transform_inputs=transform_inputs,
-            transform_output=transform_output,
+        boba = Boba()
+        result = boba.eval(
+            input="Hello",
+            output="Hi there! How can I help you?",
+            expected="Should greet the user politely",
         )
 
-        result = eval_config.run([{"role": "user", "message": "hello"}])
-        assert result == "HELLO"
+        assert "passed" in result
+        assert "reasoning" in result
+        assert "run_id" in result
+        assert result["run_id"] is not None
 
+    def test_eval_with_name(self, client):
+        """Test single eval with custom name."""
+        from simboba import Boba
 
-class TestRunner:
-    """Test the eval runner module."""
+        boba = Boba()
+        result = boba.eval(
+            input="What's 2+2?",
+            output="4",
+            expected="Should return 4",
+            name="math-test",
+        )
 
-    def test_run_case_success(self):
-        from simboba import Eval
-        from simboba.runner import run_case
+        assert "passed" in result
+        assert "run_id" in result
 
-        def echo_fn(messages):
-            return f"Echo: {messages[0]['message']}"
+    def test_run_against_dataset(self, client):
+        """Test running an agent against a dataset."""
+        from simboba import Boba
 
-        eval_config = Eval(name="echo", fn=echo_fn)
-        case = {
-            "id": 1,
-            "inputs": [{"role": "user", "message": "Hello"}],
-            "expected_outcome": "Should echo the message",
-        }
+        # Create a dataset with cases via API
+        ds_resp = client.post(
+            "/api/datasets",
+            json={"name": "test-run-dataset", "description": "For testing boba.run()"},
+        )
+        dataset_id = ds_resp.json()["id"]
 
-        result = run_case(eval_config, case)
-        assert result.case_id == 1
-        assert result.actual_output == "Echo: Hello"
-        assert result.execution_time_ms is not None
-
-    def test_run_case_with_judge(self):
-        from simboba import Eval
-        from simboba.runner import run_case
-
-        def greet_fn(messages):
-            return "Hello there!"
-
-        def mock_judge(inputs, expected, actual):
-            return True, "Output contains greeting"
-
-        eval_config = Eval(name="greet", fn=greet_fn)
-        case = {
-            "id": 1,
-            "inputs": [{"role": "user", "message": "Hi"}],
-            "expected_outcome": "Should greet",
-        }
-
-        result = run_case(eval_config, case, mock_judge)
-        assert result.passed is True
-        assert result.judgment == "PASS"
-        assert result.reasoning == "Output contains greeting"
-
-    def test_run_case_error_handling(self):
-        from simboba import Eval
-        from simboba.runner import run_case
-
-        def failing_fn(messages):
-            raise ValueError("Something went wrong")
-
-        eval_config = Eval(name="fail", fn=failing_fn)
-        case = {
-            "id": 1,
-            "inputs": [{"role": "user", "message": "Hi"}],
-            "expected_outcome": "Should work",
-        }
-
-        result = run_case(eval_config, case)
-        assert result.passed is False
-        assert "Something went wrong" in result.error_message
-
-    def test_run_eval_multiple_cases(self):
-        from simboba import Eval
-        from simboba.runner import run_eval
-
-        def length_fn(messages):
-            return f"Length: {len(messages)}"
-
-        def mock_judge(inputs, expected, actual):
-            return "Length:" in actual, "Has length"
-
-        eval_config = Eval(name="length", fn=length_fn)
-        cases = [
-            {"id": 1, "inputs": [{"role": "user", "message": "A"}], "expected_outcome": "test"},
-            {"id": 2, "inputs": [{"role": "user", "message": "B"}], "expected_outcome": "test"},
-            {"id": 3, "inputs": [{"role": "user", "message": "C"}], "expected_outcome": "test"},
+        # Add test cases
+        test_cases = [
+            {"message": "Hello", "expected": "Should greet back"},
+            {"message": "How are you?", "expected": "Should respond politely"},
+            {"message": "Goodbye", "expected": "Should say farewell"},
         ]
 
-        result = run_eval(eval_config, cases, mock_judge)
-        assert result.total == 3
-        assert result.passed == 3
-        assert result.failed == 0
-        assert result.score == 100.0
+        for tc in test_cases:
+            client.post(
+                "/api/cases",
+                json={
+                    "dataset_id": dataset_id,
+                    "inputs": [{"role": "user", "message": tc["message"], "attachments": []}],
+                    "expected_outcome": tc["expected"],
+                },
+            )
+
+        # Define a simple agent function
+        def echo_agent(message: str) -> str:
+            return f"You said: {message}. Hello! I'm doing well, goodbye!"
+
+        # Run the agent against the dataset
+        boba = Boba()
+        result = boba.run(agent=echo_agent, dataset="test-run-dataset")
+
+        # Verify results
+        assert result["total"] == 3
+        assert result["passed"] + result["failed"] == 3
+        assert "score" in result
+        assert "run_id" in result
+        assert result["run_id"] is not None
 
 
 class TestJudge:
@@ -359,13 +309,8 @@ class TestJudge:
         assert passed is False
 
 
-class TestEvalRunAPI:
-    """Test the eval run API endpoints."""
-
-    def test_list_evals_empty(self, client):
-        response = client.get("/api/evals")
-        assert response.status_code == 200
-        assert response.json() == []
+class TestRunsAPI:
+    """Test the eval run API endpoints (read-only, runs created by Boba class)."""
 
     def test_list_runs_empty(self, client):
         ds_resp = client.post("/api/datasets", json={"name": "ds"})
@@ -375,102 +320,36 @@ class TestEvalRunAPI:
         assert response.status_code == 200
         assert response.json() == []
 
-    def test_start_run_no_eval_loaded(self, client):
-        ds_resp = client.post("/api/datasets", json={"name": "ds"})
-        dataset_id = ds_resp.json()["id"]
+    def test_list_and_delete_run(self, client):
+        """Test that runs created by Boba can be viewed and deleted via API."""
+        from simboba import Boba
 
-        # Add a case
-        client.post(
-            "/api/cases",
-            json={
-                "dataset_id": dataset_id,
-                "inputs": [{"role": "user", "message": "Hi", "attachments": []}],
-                "expected_outcome": "test",
-            },
+        # Create a run using the Boba class
+        boba = Boba()
+        result = boba.eval(
+            input="Test input",
+            output="Test output",
+            expected="Should work",
         )
+        run_id = result["run_id"]
 
-        response = client.post(
-            "/api/runs",
-            json={"dataset_id": dataset_id, "eval_name": "nonexistent"},
-        )
-        assert response.status_code == 404
-        assert "not found" in response.json()["detail"]
-
-    def test_start_run_no_cases(self, client):
-        from simboba import Eval
-        from simboba.server import set_loaded_evals
-
-        # Set up a mock eval
-        def mock_fn(messages):
-            return "ok"
-
-        set_loaded_evals({"test-eval": Eval(name="test-eval", fn=mock_fn)})
-
-        ds_resp = client.post("/api/datasets", json={"name": "empty-ds"})
-        dataset_id = ds_resp.json()["id"]
-
-        response = client.post(
-            "/api/runs",
-            json={"dataset_id": dataset_id, "eval_name": "test-eval"},
-        )
-        assert response.status_code == 400
-        assert "no cases" in response.json()["detail"].lower()
-
-        # Clean up
-        set_loaded_evals({})
-
-    def test_full_run_flow(self, client):
-        from simboba import Eval
-        from simboba.server import set_loaded_evals
-
-        # Set up a mock eval
-        def echo_fn(messages):
-            return f"Echo: {messages[0]['message']}"
-
-        set_loaded_evals({"echo-eval": Eval(name="echo-eval", fn=echo_fn)})
-
-        # Create dataset with cases
-        ds_resp = client.post("/api/datasets", json={"name": "run-test"})
-        dataset_id = ds_resp.json()["id"]
-
-        for i in range(2):
-            client.post(
-                "/api/cases",
-                json={
-                    "dataset_id": dataset_id,
-                    "name": f"Case {i}",
-                    "inputs": [{"role": "user", "message": f"Test {i}", "attachments": []}],
-                    "expected_outcome": "Should echo",
-                },
-            )
-
-        # Start run
-        run_resp = client.post(
-            "/api/runs",
-            json={"dataset_id": dataset_id, "eval_name": "echo-eval"},
-        )
-        assert run_resp.status_code == 200
-        run = run_resp.json()
-        assert run["status"] == "completed"
-        assert run["total"] == 2
-        assert run["eval_name"] == "echo-eval"
-
-        # Get run details
-        run_id = run["id"]
+        # Get run details via API
         detail_resp = client.get(f"/api/runs/{run_id}")
         assert detail_resp.status_code == 200
         details = detail_resp.json()
-        assert len(details["results"]) == 2
-        assert all("Echo:" in r["actual_output"] for r in details["results"])
+        assert details["id"] == run_id
+        assert details["status"] == "completed"
 
-        # List runs
-        list_resp = client.get(f"/api/runs?dataset_id={dataset_id}")
+        # List all runs
+        list_resp = client.get("/api/runs")
         assert list_resp.status_code == 200
-        assert len(list_resp.json()) == 1
+        runs = list_resp.json()
+        assert any(r["id"] == run_id for r in runs)
 
         # Delete run
         del_resp = client.delete(f"/api/runs/{run_id}")
         assert del_resp.status_code == 200
 
-        # Clean up
-        set_loaded_evals({})
+        # Verify it's gone
+        get_resp = client.get(f"/api/runs/{run_id}")
+        assert get_resp.status_code == 404
