@@ -1,5 +1,7 @@
 # simboba
 
+[![PyPI](https://img.shields.io/pypi/v/simboba)](https://pypi.org/project/simboba/)
+
 ```
      ( )
    .-~~~-.
