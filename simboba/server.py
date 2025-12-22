@@ -114,6 +114,16 @@ def create_app() -> FastAPI:
         return {"message": "Simboba API is running. Static files not found."}
 
     # --- Dataset Routes ---
+    # Datasets can be looked up by either name or UUID (id)
+
+    def _get_dataset_by_name_or_id(identifier: str) -> Optional[dict]:
+        """Look up a dataset by name first, then by UUID."""
+        # Try by name first
+        dataset = storage.get_dataset(identifier)
+        if dataset:
+            return dataset
+        # Try by UUID
+        return storage.get_dataset_by_id(identifier)
 
     @app.get("/api/datasets")
     def list_datasets():
@@ -129,28 +139,38 @@ def create_app() -> FastAPI:
             "description": data.description,
             "cases": [],
         }
-        return storage.save_dataset(dataset)
+        result = storage.save_dataset(dataset)
+        logger.info(f"Created dataset '{data.name}' with id={result.get('id')}")
+        return result
 
-    @app.get("/api/datasets/{dataset_name}")
-    def get_dataset(dataset_name: str):
-        dataset = storage.get_dataset(dataset_name)
+    @app.get("/api/datasets/{identifier}")
+    def get_dataset(identifier: str):
+        """Get a dataset by name or UUID."""
+        dataset = _get_dataset_by_name_or_id(identifier)
         if not dataset:
+            logger.warning(f"Dataset not found: {identifier}")
             raise HTTPException(status_code=404, detail="Dataset not found")
         return dataset
 
-    @app.put("/api/datasets/{dataset_name}")
-    def update_dataset(dataset_name: str, data: DatasetUpdate):
-        dataset = storage.get_dataset(dataset_name)
+    @app.put("/api/datasets/{identifier}")
+    def update_dataset(identifier: str, data: DatasetUpdate):
+        """Update a dataset by name or UUID."""
+        dataset = _get_dataset_by_name_or_id(identifier)
         if not dataset:
+            logger.warning(f"Dataset not found for update: {identifier}")
             raise HTTPException(status_code=404, detail="Dataset not found")
 
+        current_name = dataset["name"]
+
         # Handle rename using the rename_dataset function (preserves UUID)
-        if data.name is not None and data.name != dataset_name:
+        if data.name is not None and data.name != current_name:
             try:
-                dataset = storage.rename_dataset(dataset_name, data.name)
+                dataset = storage.rename_dataset(current_name, data.name)
                 if not dataset:
                     raise HTTPException(status_code=404, detail="Dataset not found")
+                logger.info(f"Renamed dataset '{current_name}' to '{data.name}'")
             except ValueError as e:
+                logger.error(f"Failed to rename dataset: {e}")
                 raise HTTPException(status_code=400, detail=str(e))
 
         if data.description is not None:
@@ -159,15 +179,23 @@ def create_app() -> FastAPI:
 
         return dataset
 
-    @app.delete("/api/datasets/{dataset_name}")
-    def delete_dataset(dataset_name: str):
-        if not storage.delete_dataset(dataset_name):
+    @app.delete("/api/datasets/{identifier}")
+    def delete_dataset(identifier: str):
+        """Delete a dataset by name or UUID."""
+        dataset = _get_dataset_by_name_or_id(identifier)
+        if not dataset:
+            logger.warning(f"Dataset not found for delete: {identifier}")
             raise HTTPException(status_code=404, detail="Dataset not found")
+
+        if not storage.delete_dataset(dataset["name"]):
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        logger.info(f"Deleted dataset '{dataset['name']}' (id={dataset.get('id')})")
         return {"message": "Dataset deleted"}
 
-    @app.get("/api/datasets/{dataset_name}/export")
-    def export_dataset(dataset_name: str):
-        dataset = storage.get_dataset(dataset_name)
+    @app.get("/api/datasets/{identifier}/export")
+    def export_dataset(identifier: str):
+        """Export a dataset by name or UUID."""
+        dataset = _get_dataset_by_name_or_id(identifier)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
         return {
@@ -229,16 +257,23 @@ def create_app() -> FastAPI:
         return storage.save_dataset(dataset)
 
     # --- Case Routes ---
+    # Cases use dataset_id (UUID) for lookup, with fallback to name
 
     @app.get("/api/cases")
-    def list_cases(dataset_name: Optional[str] = Query(None)):
-        if dataset_name:
-            dataset = storage.get_dataset(dataset_name)
+    def list_cases(
+        dataset_name: Optional[str] = Query(None),
+        dataset_id: Optional[str] = Query(None)
+    ):
+        """List cases, optionally filtered by dataset name or ID."""
+        identifier = dataset_id or dataset_name
+        if identifier:
+            dataset = _get_dataset_by_name_or_id(identifier)
             if not dataset:
                 raise HTTPException(status_code=404, detail="Dataset not found")
             cases = dataset.get("cases", [])
             for case in cases:
-                case["dataset_name"] = dataset_name
+                case["dataset_name"] = dataset["name"]
+                case["dataset_id"] = dataset["id"]
             return cases
         else:
             # Return all cases from all datasets
@@ -246,13 +281,15 @@ def create_app() -> FastAPI:
             for dataset in storage.list_datasets():
                 for case in dataset.get("cases", []):
                     case["dataset_name"] = dataset["name"]
+                    case["dataset_id"] = dataset["id"]
                     all_cases.append(case)
             return all_cases
 
     @app.post("/api/cases")
     def create_case(data: CaseCreate):
-        dataset = storage.get_dataset(data.dataset_name)
+        dataset = _get_dataset_by_name_or_id(data.dataset_name)
         if not dataset:
+            logger.warning(f"Dataset not found for case creation: {data.dataset_name}")
             raise HTTPException(status_code=404, detail="Dataset not found")
 
         case = {
@@ -261,17 +298,28 @@ def create_app() -> FastAPI:
             "expected_outcome": data.expected_outcome,
             "expected_source": data.expected_source.model_dump() if data.expected_source else None,
         }
-        return storage.add_case(data.dataset_name, case)
+        result = storage.add_case(dataset["name"], case)
+        logger.info(f"Created case '{data.name}' in dataset '{dataset['name']}'")
+        return result
 
-    @app.get("/api/cases/{dataset_name}/{case_id}")
-    def get_case(dataset_name: str, case_id: str):
-        case = storage.get_case(dataset_name, case_id)
+    @app.get("/api/cases/{dataset_identifier}/{case_id}")
+    def get_case(dataset_identifier: str, case_id: str):
+        """Get a case by dataset name/ID and case ID."""
+        dataset = _get_dataset_by_name_or_id(dataset_identifier)
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        case = storage.get_case(dataset["name"], case_id)
         if not case:
             raise HTTPException(status_code=404, detail="Case not found")
         return case
 
-    @app.put("/api/cases/{dataset_name}/{case_id}")
-    def update_case(dataset_name: str, case_id: str, data: CaseUpdate):
+    @app.put("/api/cases/{dataset_identifier}/{case_id}")
+    def update_case(dataset_identifier: str, case_id: str, data: CaseUpdate):
+        """Update a case by dataset name/ID and case ID."""
+        dataset = _get_dataset_by_name_or_id(dataset_identifier)
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+
         updates = {}
         if data.name is not None:
             updates["name"] = data.name
@@ -282,34 +330,41 @@ def create_app() -> FastAPI:
         if data.expected_source is not None:
             updates["expected_source"] = data.expected_source.model_dump()
 
-        case = storage.update_case(dataset_name, case_id, updates)
+        case = storage.update_case(dataset["name"], case_id, updates)
         if not case:
             raise HTTPException(status_code=404, detail="Case not found")
+        logger.info(f"Updated case '{case_id}' in dataset '{dataset['name']}'")
         return case
 
-    @app.delete("/api/cases/{dataset_name}/{case_id}")
-    def delete_case(dataset_name: str, case_id: str):
-        if not storage.delete_case(dataset_name, case_id):
+    @app.delete("/api/cases/{dataset_identifier}/{case_id}")
+    def delete_case(dataset_identifier: str, case_id: str):
+        """Delete a case by dataset name/ID and case ID."""
+        dataset = _get_dataset_by_name_or_id(dataset_identifier)
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        if not storage.delete_case(dataset["name"], case_id):
             raise HTTPException(status_code=404, detail="Case not found")
+        logger.info(f"Deleted case '{case_id}' from dataset '{dataset['name']}'")
         return {"message": "Case deleted"}
 
     @app.post("/api/cases/bulk")
     def bulk_create_cases(data: BulkCreateCases):
-        dataset = storage.get_dataset(data.dataset_name)
+        dataset = _get_dataset_by_name_or_id(data.dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
 
         created = []
         for case_data in data.cases:
-            case = storage.add_case(data.dataset_name, case_data)
+            case = storage.add_case(dataset["name"], case_data)
             created.append(case)
+        logger.info(f"Bulk created {len(created)} cases in dataset '{dataset['name']}'")
         return created
 
     # --- Generation Routes ---
 
     @app.post("/api/generate")
     def generate_cases(data: GenerateRequest):
-        dataset = storage.get_dataset(data.dataset_name)
+        dataset = _get_dataset_by_name_or_id(data.dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -336,7 +391,7 @@ def create_app() -> FastAPI:
         files: list[UploadFile] = File(...),
     ):
         """Generate test cases using uploaded files as reference material."""
-        dataset = storage.get_dataset(dataset_name)
+        dataset = _get_dataset_by_name_or_id(dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -380,13 +435,13 @@ def create_app() -> FastAPI:
 
     @app.post("/api/generate/accept")
     def accept_cases(data: AcceptCasesRequest):
-        dataset = storage.get_dataset(data.dataset_name)
+        dataset = _get_dataset_by_name_or_id(data.dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
 
         created = []
         for case_data in data.cases:
-            case = storage.add_case(data.dataset_name, case_data)
+            case = storage.add_case(dataset["name"], case_data)
             created.append(case)
 
         return {

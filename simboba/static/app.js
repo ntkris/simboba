@@ -38,14 +38,15 @@ function handleHashChange() {
     const parts = hash.split('/');
     const page = parts[0];
     const id = parts[1];
+    const id2 = parts[2];
 
     if (page === 'datasets' && id) {
         navigateTo('datasets');
-        loadDatasetDetail(parseInt(id));
-    } else if (page === 'runs' && id) {
-        // Open run sidebar
+        loadDatasetDetail(decodeURIComponent(id));
+    } else if (page === 'runs' && id && id2) {
+        // Open run sidebar with dataset_id and filename
         navigateTo('runs');
-        openRunSidebar(parseInt(id));
+        openRunSidebar(decodeURIComponent(id), decodeURIComponent(id2));
     } else {
         navigateTo(page);
     }
@@ -68,7 +69,6 @@ function navigateTo(page) {
     if (page === 'dashboard') renderDashboard();
     if (page === 'datasets') renderDatasetsPage();
     if (page === 'runs') renderRunsPage();
-    if (page === 'playground') renderPlaygroundPage();
     if (page === 'settings') renderSettingsPage();
 
     // Reset detail views
@@ -266,7 +266,7 @@ function renderDatasetsPage() {
                 </thead>
                 <tbody>
                     ${datasets.map(d => `
-                        <tr onclick="viewDataset(${d.id})">
+                        <tr onclick="viewDataset('${d.id}')">
                             <td>
                                 <div class="cell-main">${escapeHtml(d.name)}</div>
                                 ${d.description ? `<div class="cell-sub">${escapeHtml(d.description)}</div>` : ''}
@@ -274,8 +274,8 @@ function renderDatasetsPage() {
                             <td><span class="mono">${d.case_count}</span></td>
                             <td><span style="color: var(--zinc-500);">${relativeTime(d.updated_at)}</span></td>
                             <td class="cell-actions" onclick="event.stopPropagation();">
-                                <button class="btn btn-ghost btn-sm" onclick="viewDataset(${d.id})">View</button>
-                                <button class="btn btn-ghost btn-sm danger" onclick="confirmDeleteDataset(${d.id}, '${escapeHtml(d.name)}', ${d.case_count})">Delete</button>
+                                <button class="btn btn-ghost btn-sm" onclick="viewDataset('${d.id}')">View</button>
+                                <button class="btn btn-ghost btn-sm danger" onclick="confirmDeleteDataset('${d.id}', '${escapeHtml(d.name)}', ${d.case_count})">Delete</button>
                             </td>
                         </tr>
                     `).join('')}
@@ -292,14 +292,19 @@ async function viewDataset(id) {
 async function loadDatasetDetail(id) {
     try {
         const [dsRes, casesRes] = await Promise.all([
-            fetch(`${API_BASE}/datasets/${id}`),
-            fetch(`${API_BASE}/cases?dataset_id=${id}`)
+            fetch(`${API_BASE}/datasets/${encodeURIComponent(id)}`),
+            fetch(`${API_BASE}/cases?dataset_id=${encodeURIComponent(id)}`)
         ]);
+        if (!dsRes.ok) {
+            const err = await dsRes.json();
+            throw new Error(err.detail || 'Dataset not found');
+        }
         currentDataset = await dsRes.json();
         currentDataset.cases = await casesRes.json();
         renderDatasetDetail();
     } catch (e) {
-        showToast('Failed to load dataset', true);
+        console.error('Failed to load dataset:', e);
+        showToast('Failed to load dataset: ' + e.message, true);
     }
 }
 
@@ -338,11 +343,11 @@ function renderDatasetDetail() {
 }
 
 function renderCaseListItem(c) {
-    const name = c.name || `Case #${c.id}`;
-    const messageCount = c.inputs.length;
+    const name = c.name || `Case #${c.id.substring(0, 8)}`;
+    const messageCount = c.inputs?.length || 0;
 
     return `
-        <div class="case-list-item" onclick="openCaseSidebar(${c.id})" id="case-item-${c.id}">
+        <div class="case-list-item" onclick="openCaseSidebar('${c.id}')" id="case-item-${c.id}">
             <span class="case-list-name">${escapeHtml(name)}</span>
             <span class="case-list-meta">${messageCount} message${messageCount !== 1 ? 's' : ''}</span>
             <span class="case-list-arrow">›</span>
@@ -361,7 +366,7 @@ function openCaseSidebar(caseId) {
     document.getElementById(`case-item-${caseId}`)?.classList.add('selected');
 
     // Update sidebar title
-    document.getElementById('sidebar-case-title').textContent = c.name || `Case #${c.id}`;
+    document.getElementById('sidebar-case-title').textContent = c.name || `Case #${c.id.substring(0, 8)}`;
 
     // Render conversation and expected outcome
     const content = document.getElementById('sidebar-case-content');
@@ -541,14 +546,17 @@ function renderRunsPage() {
 function renderRunListItem(r) {
     const dataset = r.dataset_id ? datasets.find(d => d.id === r.dataset_id) : null;
     // For ad-hoc evals, show eval name; for dataset runs, show dataset name
-    const title = dataset ? dataset.name : (r.eval_name || 'Single Eval');
+    const title = dataset ? dataset.name : (r.dataset_name || r.eval_name || 'Single Eval');
     const rateClass = r.score >= 80 ? 'rate-high' : (r.score >= 60 ? 'rate-mid' : 'rate-low');
     const isRunning = r.status === 'running';
     // For ad-hoc evals, don't show "X cases" if it's just 1
     const casesLabel = r.total === 1 && !r.dataset_id ? '1 eval' : `${r.total} cases`;
+    // Use dataset_id and filename to identify runs
+    const datasetId = r.dataset_id || '_adhoc';
+    const runItemId = `run-item-${datasetId}-${r.filename}`;
 
     return `
-        <div class="run-list-item" onclick="openRunSidebar(${r.id})" id="run-item-${r.id}">
+        <div class="run-list-item" onclick="openRunSidebar('${datasetId}', '${r.filename}')" id="${runItemId}">
             <div class="run-list-info">
                 <div class="run-list-name">
                     ${isRunning ? '<span class="status-dot running" style="margin-right: 6px;"></span>' : ''}
@@ -565,12 +573,12 @@ function renderRunListItem(r) {
     `;
 }
 
-async function openRunSidebar(runId) {
-    selectedRunId = runId;
+async function openRunSidebar(datasetId, filename) {
+    selectedRunId = { datasetId, filename };
 
     // Update selected state
     document.querySelectorAll('.run-list-item').forEach(el => el.classList.remove('selected'));
-    document.getElementById(`run-item-${runId}`)?.classList.add('selected');
+    document.getElementById(`run-item-${datasetId}-${filename}`)?.classList.add('selected');
 
     // Show loading state
     document.getElementById('sidebar-run-title').textContent = 'Loading...';
@@ -587,13 +595,18 @@ async function openRunSidebar(runId) {
 
     // Fetch run details
     try {
-        const response = await fetch(`${API_BASE}/runs/${runId}`);
+        const response = await fetch(`${API_BASE}/runs/${encodeURIComponent(datasetId)}/${encodeURIComponent(filename)}`);
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.detail || 'Run not found');
+        }
         const run = await response.json();
         renderRunSidebarContent(run);
     } catch (e) {
+        console.error('Failed to load run:', e);
         document.getElementById('sidebar-run-content').innerHTML = `
             <div class="empty-state" style="padding: 40px;">
-                <p>Failed to load run details</p>
+                <p>Failed to load run details: ${escapeHtml(e.message)}</p>
             </div>
         `;
     }
@@ -602,8 +615,13 @@ async function openRunSidebar(runId) {
 function renderRunSidebarContent(r) {
     const dataset = r.dataset_id ? datasets.find(d => d.id === r.dataset_id) : null;
     // For ad-hoc evals, show the eval name; for dataset runs, show dataset name
-    const title = dataset ? dataset.name : (r.eval_name || 'Single Eval');
-    const results = r.results || [];
+    const title = dataset ? dataset.name : (r.dataset_name || r.eval_name || 'Single Eval');
+    // results is a dict {case_id: result}, convert to array
+    const resultsObj = r.results || {};
+    const results = Object.entries(resultsObj).map(([caseId, result]) => ({
+        ...result,
+        case_id: caseId
+    }));
 
     const duration = r.completed_at
         ? formatDuration(new Date(r.completed_at) - new Date(r.started_at))
@@ -649,31 +667,47 @@ function renderRunSidebarContent(r) {
     `;
 
     // Wire up delete button
+    const datasetId = r.dataset_id || '_adhoc';
     document.getElementById('sidebar-run-delete-btn').onclick = () => {
         if (confirm('Delete this run?')) {
-            deleteRun(r.id);
+            deleteRun(datasetId, r.filename);
         }
     };
 }
 
 function renderSidebarResultItem(res) {
     const c = res.case || {};
+    const resultId = res.case_id || 'adhoc';
+    // Get inputs from case or result (for ad-hoc evals)
+    const inputs = c.inputs || res.inputs || [];
     // For ad-hoc evals (no case), show "Eval" or use the input message
     let name;
-    if (res.case_id) {
-        name = c.name || `Case #${res.case_id}`;
+    if (res.case_id && res.case_id !== '_adhoc') {
+        name = c.name || `Case #${res.case_id.substring(0, 8)}`;
     } else {
         // Ad-hoc eval - try to get a meaningful name from inputs
-        const inputs = res.inputs || [];
         const firstMessage = inputs[0]?.message || '';
         name = firstMessage.length > 30 ? firstMessage.substring(0, 30) + '...' : (firstMessage || 'Eval');
     }
     // For ad-hoc evals, expected_outcome is stored on the result, not the case
     const expectedOutcome = c.expected_outcome || res.expected_outcome || '—';
 
+    // Render inputs/conversation
+    const conversationHtml = inputs.length > 0 ? `
+        <div style="margin-bottom: 16px;">
+            <div class="detail-box-label">Conversation</div>
+            ${inputs.map(m => `
+                <div class="conversation-message">
+                    <span class="message-role-badge ${m.role}">${m.role}</span>
+                    <div class="message-content">${escapeHtml(m.message || '')}</div>
+                </div>
+            `).join('')}
+        </div>
+    ` : '';
+
     return `
-        <div class="result-list-item" id="sidebar-result-${res.id}">
-            <div class="result-list-header" onclick="toggleSidebarResult(${res.id})">
+        <div class="result-list-item" id="sidebar-result-${resultId}">
+            <div class="result-list-header" onclick="toggleSidebarResult('${resultId}')">
                 <span class="result-list-expand">›</span>
                 <div class="result-list-info">
                     <span class="result-list-name">${escapeHtml(name)}</span>
@@ -684,24 +718,27 @@ function renderSidebarResultItem(res) {
                 </span>
             </div>
             <div class="result-list-detail">
-                <div style="margin-bottom: 12px;">
-                    <div class="detail-box-label">Expected</div>
-                    <div style="font-size: 13px;">${escapeHtml(expectedOutcome)}</div>
+                ${conversationHtml}
+                <div style="margin-bottom: 16px;">
+                    <div class="detail-box-label">Expected Outcome</div>
+                    <div class="expected-outcome-box">${escapeHtml(expectedOutcome)}</div>
                 </div>
-                <div style="margin-bottom: 12px;">
-                    <div class="detail-box-label">Actual</div>
-                    <div style="font-size: 13px; padding: 8px; background: white; border-radius: 4px; border-left: 3px solid ${res.passed ? 'var(--green-500)' : 'var(--red-500)'};">
+                <div style="margin-bottom: 16px;">
+                    <div class="detail-box-label">Actual Output</div>
+                    <div style="font-size: 13px; padding: 12px; background: white; border-radius: 4px; border-left: 3px solid ${res.passed ? 'var(--green-500)' : 'var(--red-500)'};">
                         ${escapeHtml(res.actual_output || '—')}
                     </div>
                 </div>
                 ${res.reasoning ? `
-                    <div>
-                        <div class="detail-box-label">Reasoning</div>
-                        <div style="font-size: 13px;">${escapeHtml(res.reasoning)}</div>
+                    <div style="margin-bottom: 16px;">
+                        <div class="detail-box-label">Judge Reasoning</div>
+                        <div style="font-size: 13px; padding: 12px; background: var(--zinc-50); border-radius: 4px; color: var(--zinc-600);">
+                            ${escapeHtml(res.reasoning)}
+                        </div>
                     </div>
                 ` : ''}
                 ${res.error_message ? `
-                    <div style="margin-top: 12px; padding: 8px; background: var(--red-50); border-radius: 4px; color: #991b1b;">
+                    <div style="padding: 12px; background: var(--red-50); border-radius: 4px; color: #991b1b;">
                         <div class="detail-box-label" style="color: #991b1b;">Error</div>
                         <div style="font-size: 13px;">${escapeHtml(res.error_message)}</div>
                     </div>
@@ -725,14 +762,18 @@ function closeRunSidebar() {
     document.querySelectorAll('.run-list-item').forEach(el => el.classList.remove('selected'));
 }
 
-async function deleteRun(id) {
+async function deleteRun(datasetId, filename) {
     try {
-        await fetch(`${API_BASE}/runs/${id}`, { method: 'DELETE' });
+        const response = await fetch(`${API_BASE}/runs/${encodeURIComponent(datasetId)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+        if (!response.ok) {
+            throw new Error('Failed to delete run');
+        }
         closeRunSidebar();
         await loadRuns();
         renderRunsPage();
         showToast('Run deleted');
     } catch (e) {
+        console.error('Failed to delete run:', e);
         showToast('Failed to delete run', true);
     }
 }
@@ -837,12 +878,16 @@ function confirmDeleteDataset(id, name, caseCount) {
 
 async function deleteDataset(id) {
     try {
-        await fetch(`${API_BASE}/datasets/${id}`, { method: 'DELETE' });
+        const response = await fetch(`${API_BASE}/datasets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!response.ok) {
+            throw new Error('Failed to delete dataset');
+        }
         hideModal('modal-delete-dataset');
         await loadDatasets();
         showToast('Dataset deleted');
         window.location.hash = 'datasets';
     } catch (e) {
+        console.error('Failed to delete dataset:', e);
         showToast('Failed to delete dataset', true);
     }
 }
@@ -1306,213 +1351,3 @@ function showToast(message, isError = false) {
     }, 3000);
 }
 
-// Playground Page - Hardcoded example queries
-const EXAMPLE_QUERIES = {
-    'Show all datasets': 'SELECT id, name, description, created_at FROM datasets ORDER BY created_at DESC LIMIT 100',
-    'Find last 10 run results': 'SELECT er.id, er.passed, er.actual_output, er.reasoning, er.created_at, ec.name as case_name FROM eval_results er LEFT JOIN eval_cases ec ON er.case_id = ec.id ORDER BY er.created_at DESC LIMIT 10',
-    'Show runs with score below 50%': 'SELECT id, eval_name, score, passed, failed, total, started_at FROM eval_runs WHERE score < 50 ORDER BY started_at DESC LIMIT 100',
-    'Count cases per dataset': 'SELECT d.name, COUNT(ec.id) as case_count FROM datasets d LEFT JOIN eval_cases ec ON d.id = ec.dataset_id GROUP BY d.id ORDER BY case_count DESC',
-};
-
-function renderPlaygroundPage() {
-    const container = document.getElementById('playground-content');
-
-    container.innerHTML = `
-        <div class="page-header">
-            <div>
-                <h1 class="page-title">Playground</h1>
-                <p class="page-subtitle">Query your data using natural language</p>
-            </div>
-        </div>
-
-        <div class="playground-input-section" style="margin-bottom: 24px;">
-            <div class="input-group" style="margin-bottom: 12px;">
-                <label for="playground-query">Ask a question about your data</label>
-                <div style="display: flex; gap: 8px;">
-                    <input type="text" id="playground-query"
-                        placeholder="e.g., Find last 10 results of runs"
-                        style="flex: 1;"
-                        onkeydown="if(event.key === 'Enter') runPlaygroundQuery()">
-                    <button class="btn btn-primary" onclick="runPlaygroundQuery()">Run Query</button>
-                </div>
-            </div>
-            <div class="example-queries" style="display: flex; gap: 8px; flex-wrap: wrap;">
-                <span style="color: var(--zinc-500); font-size: 13px;">Examples:</span>
-                <button class="btn btn-ghost btn-sm" onclick="runExampleQuery('Show all datasets')">Show all datasets</button>
-                <button class="btn btn-ghost btn-sm" onclick="runExampleQuery('Find last 10 run results')">Last 10 run results</button>
-                <button class="btn btn-ghost btn-sm" onclick="runExampleQuery('Show runs with score below 50%')">Runs below 50%</button>
-                <button class="btn btn-ghost btn-sm" onclick="runExampleQuery('Count cases per dataset')">Cases per dataset</button>
-            </div>
-        </div>
-
-        <div id="playground-results"></div>
-    `;
-}
-
-function runExampleQuery(name) {
-    const sql = EXAMPLE_QUERIES[name];
-    if (sql) {
-        document.getElementById('playground-query').value = name;
-        runPlaygroundSQL(sql);
-    }
-}
-
-async function runPlaygroundSQL(sql) {
-    const resultsDiv = document.getElementById('playground-results');
-
-    // Show loading
-    resultsDiv.innerHTML = `
-        <div class="loading" style="padding: 40px;">
-            <div class="spinner"></div>
-            Executing query...
-        </div>
-    `;
-
-    try {
-        const response = await fetch(`${API_BASE}/playground/sql`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sql })
-        });
-
-        const result = await response.json();
-
-        if (result.success) {
-            renderPlaygroundResults(result);
-        } else {
-            resultsDiv.innerHTML = `
-                <div style="background: var(--red-50); border: 1px solid var(--red-500); border-radius: 4px; padding: 16px;">
-                    <div style="color: #991b1b; font-weight: 500; margin-bottom: 8px;">Query failed</div>
-                    <div style="font-size: 13px; color: #991b1b;">${escapeHtml(result.error)}</div>
-                    <div style="margin-top: 12px;">
-                        <div class="detail-box-label">SQL</div>
-                        <pre class="mono" style="background: white; padding: 8px; border-radius: 4px; font-size: 12px; overflow-x: auto;">${escapeHtml(sql)}</pre>
-                    </div>
-                </div>
-            `;
-        }
-    } catch (e) {
-        resultsDiv.innerHTML = `
-            <div style="background: var(--red-50); border: 1px solid var(--red-500); border-radius: 4px; padding: 16px; color: #991b1b;">
-                <strong>Request failed:</strong> ${escapeHtml(e.message)}
-            </div>
-        `;
-    }
-}
-
-async function runPlaygroundQuery() {
-    const query = document.getElementById('playground-query').value.trim();
-    const resultsDiv = document.getElementById('playground-results');
-
-    if (!query) {
-        showToast('Please enter a query', true);
-        return;
-    }
-
-    // Show loading
-    resultsDiv.innerHTML = `
-        <div class="loading" style="padding: 40px;">
-            <div class="spinner"></div>
-            Generating and executing query...
-        </div>
-    `;
-
-    try {
-        const response = await fetch(`${API_BASE}/playground/query`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query })
-        });
-
-        const result = await response.json();
-
-        if (result.success) {
-            renderPlaygroundResults(result);
-        } else {
-            resultsDiv.innerHTML = `
-                <div style="background: var(--red-50); border: 1px solid var(--red-500); border-radius: 4px; padding: 16px;">
-                    <div style="color: #991b1b; font-weight: 500; margin-bottom: 8px;">Query failed</div>
-                    <div style="font-size: 13px; color: #991b1b;">${escapeHtml(result.error)}</div>
-                    ${result.sql ? `
-                        <div style="margin-top: 12px;">
-                            <div class="detail-box-label">Generated SQL</div>
-                            <pre class="mono" style="background: white; padding: 8px; border-radius: 4px; font-size: 12px; overflow-x: auto;">${escapeHtml(result.sql)}</pre>
-                        </div>
-                    ` : ''}
-                </div>
-            `;
-        }
-    } catch (e) {
-        resultsDiv.innerHTML = `
-            <div style="background: var(--red-50); border: 1px solid var(--red-500); border-radius: 4px; padding: 16px; color: #991b1b;">
-                <strong>Request failed:</strong> ${escapeHtml(e.message)}
-            </div>
-        `;
-    }
-}
-
-function renderPlaygroundResults(result) {
-    const resultsDiv = document.getElementById('playground-results');
-    const { sql, columns, results } = result;
-
-    if (results.length === 0) {
-        resultsDiv.innerHTML = `
-            <div style="margin-bottom: 16px;">
-                <div class="detail-box-label">Generated SQL</div>
-                <pre class="mono" style="background: var(--zinc-100); padding: 12px; border-radius: 4px; font-size: 12px; overflow-x: auto;">${escapeHtml(sql)}</pre>
-            </div>
-            <div class="empty-state" style="padding: 40px;">
-                <h3>No results</h3>
-                <p>The query returned no rows.</p>
-            </div>
-        `;
-        return;
-    }
-
-    // Build table
-    const tableHtml = `
-        <div style="margin-bottom: 16px;">
-            <div class="detail-box-label">Generated SQL</div>
-            <pre class="mono" style="background: var(--zinc-100); padding: 12px; border-radius: 4px; font-size: 12px; overflow-x: auto;">${escapeHtml(sql)}</pre>
-        </div>
-        <div style="margin-bottom: 8px; color: var(--zinc-500); font-size: 13px;">
-            ${results.length} row${results.length !== 1 ? 's' : ''} returned
-        </div>
-        <div class="table-container" style="overflow-x: auto;">
-            <table>
-                <thead>
-                    <tr>
-                        ${columns.map(col => `<th>${escapeHtml(col)}</th>`).join('')}
-                    </tr>
-                </thead>
-                <tbody>
-                    ${results.map(row => `
-                        <tr>
-                            ${columns.map(col => `<td class="mono" style="font-size: 12px;">${formatCellValue(row[col])}</td>`).join('')}
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-        </div>
-    `;
-
-    resultsDiv.innerHTML = tableHtml;
-}
-
-function formatCellValue(value) {
-    if (value === null || value === undefined) {
-        return '<span style="color: var(--zinc-400);">null</span>';
-    }
-    if (typeof value === 'object') {
-        return escapeHtml(JSON.stringify(value));
-    }
-    if (typeof value === 'boolean') {
-        return value ? '<span style="color: var(--green-500);">true</span>' : '<span style="color: var(--red-500);">false</span>';
-    }
-    // Truncate long strings
-    const str = String(value);
-    if (str.length > 100) {
-        return escapeHtml(str.substring(0, 100) + '...');
-    }
-    return escapeHtml(str);
-}
