@@ -458,9 +458,17 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="File not found")
         return FileResponse(path)
 
-    # Serve static files
-    if STATIC_DIR.exists():
-        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    # Serve static assets (JS, CSS, images)
+    if (STATIC_DIR / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+
+    # Serve favicon
+    @app.get("/favicon.svg")
+    def favicon():
+        favicon_path = STATIC_DIR / "favicon.svg"
+        if favicon_path.exists():
+            return FileResponse(favicon_path, media_type="image/svg+xml")
+        raise HTTPException(status_code=404, detail="Not found")
 
     # SPA fallback - serve index.html for non-API routes (React Router support)
     @app.get("/{full_path:path}")

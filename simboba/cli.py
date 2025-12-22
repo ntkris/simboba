@@ -40,7 +40,7 @@ def _maybe_exec_in_docker():
 
 
 @click.group()
-@click.version_option(version="0.1.3")
+@click.version_option(version="0.1.4")
 def main():
     """
     \b
