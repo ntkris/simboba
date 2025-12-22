@@ -12,7 +12,7 @@
     '---'
 ```
 
-Lightweight eval tracking with LLM-as-judge. Run evals as Python scripts, track results as git-friendly JSON files, view in a web UI.
+Lightweight eval tracking with LLM-as-judge. Run evals as Python scripts, track results as git-friendly JSON files, view in a web UI. Designed for 1-click setup with your favourite AI coding tool.
 
 ## Installation
 
@@ -24,7 +24,7 @@ pip install simboba
 
 ```bash
 boba init          # Create boba-evals/ folder with templates
-boba magic         # Print AI prompt to help configure your evals
+boba magic         # Prompt for your AI tool to set up and run your first eval
 boba run           # Run your evals (handles Docker automatically)
 boba baseline      # Save run as baseline for regression detection
 boba serve         # View results at http://localhost:8787
@@ -32,16 +32,16 @@ boba serve         # View results at http://localhost:8787
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `boba init` | Create `boba-evals/` folder with starter templates |
-| `boba magic` | Print detailed AI prompt to configure your eval scripts |
-| `boba run [script]` | Run eval script (default: `test_chat.py`). Handles Docker automatically |
-| `boba baseline` | Save a run as baseline for regression detection |
-| `boba serve` | Start web UI to view results |
-| `boba datasets` | List all datasets |
-| `boba generate "description"` | Generate a dataset from a description |
-| `boba reset` | Clear run history (keeps datasets and baselines) |
+| Command                       | Description                                                             |
+| ----------------------------- | ----------------------------------------------------------------------- |
+| `boba init`                   | Create `boba-evals/` folder with starter templates                      |
+| `boba magic`                  | Print detailed prompt for AI coding assistant                           |
+| `boba run [script]`           | Run eval script (default: `test_chat.py`). Handles Docker automatically |
+| `boba baseline`               | Save a run as baseline for regression detection                         |
+| `boba serve`                  | Start web UI to view results                                            |
+| `boba datasets`               | List all datasets                                                       |
+| `boba generate "description"` | Generate a dataset from a description                                   |
+| `boba reset`                  | Clear run history (keeps datasets and baselines)                        |
 
 ## Writing Evals
 
@@ -98,16 +98,19 @@ git commit -m "Update eval baseline"
 ## Creating Datasets
 
 ### Via CLI
+
 ```bash
 boba generate "A customer support chatbot for an e-commerce site"
 ```
 
 ### Via Web UI
+
 1. `boba serve`
 2. Click "New Dataset" -> "Generate with AI"
-3. Enter a description of your agent
+3. Enter a description of your agent and we'll create test cases for you.
 
 ### Via API
+
 ```python
 from simboba import Boba
 boba = Boba()
@@ -159,6 +162,24 @@ your-project/
 │   └── .boba.yaml          # Runtime config (docker vs local)
 └── ...
 ```
+
+## Future Updates
+
+- **Eval methods** - Built-in evaluation strategies beyond LLM-as-judge
+- **Cloud storage** - Sync datasets and runs to the cloud for team collaboration
+
+## Development
+
+To work on the web UI:
+
+```bash
+cd frontend
+npm install
+npm run dev      # Dev server with hot reload (proxies to localhost:8787)
+npm run build    # Build to simboba/static/
+```
+
+Run `boba serve` in another terminal to start the backend.
 
 ## License
 

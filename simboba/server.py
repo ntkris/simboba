@@ -568,6 +568,18 @@ def create_app() -> FastAPI:
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    # SPA fallback - serve index.html for non-API routes (React Router support)
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str):
+        """Serve index.html for SPA client-side routing."""
+        # Skip API routes
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        index_path = STATIC_DIR / "index.html"
+        if index_path.exists():
+            return FileResponse(index_path)
+        raise HTTPException(status_code=404, detail="Not found")
+
     return app
 
 
