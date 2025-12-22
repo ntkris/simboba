@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
+import { User, Bot } from 'lucide-react'
 import { useStore } from '@/hooks/useStore'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -519,17 +520,43 @@ function CaseSidebar({
             <div className="text-xs font-medium uppercase tracking-wide text-zinc-400 mb-3">
               Conversation
             </div>
-            {caseData.inputs.map((m, i) => (
-              <div key={i} className="flex gap-3 mb-4 last:mb-0">
-                <span
-                  className={`text-xs font-semibold uppercase px-2 py-1 min-w-[70px] text-center shrink-0 ${m.role === 'user' ? 'bg-taro/10 text-taro' : 'bg-zinc-100 text-zinc-600'
-                    }`}
-                >
-                  {m.role}
-                </span>
-                <div className="text-sm leading-relaxed">{m.message}</div>
-              </div>
-            ))}
+            <div className="space-y-3">
+              {caseData.inputs.map((m, i) => {
+                const isUser = m.role === 'user'
+                const isLast = i === caseData.inputs.length - 1
+                return (
+                  <div
+                    key={i}
+                    className={`flex ${isUser ? 'justify-start' : 'justify-end'}`}
+                  >
+                    <div
+                      className={`flex items-start gap-2 max-w-[85%] ${
+                        isUser ? 'flex-row' : 'flex-row-reverse'
+                      }`}
+                    >
+                      <div
+                        className={`shrink-0 w-7 h-7 flex items-center justify-center ${
+                          isUser ? 'bg-taro/10 text-taro' : 'bg-zinc-100 text-zinc-600'
+                        }`}
+                      >
+                        {isUser ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+                      </div>
+                      <div
+                        className={`px-3 py-2 text-sm leading-relaxed ${
+                          isUser
+                            ? 'bg-taro/10 text-zinc-900'
+                            : isLast
+                              ? 'bg-zinc-100 text-zinc-900 border border-zinc-300'
+                              : 'bg-zinc-100 text-zinc-900'
+                        }`}
+                      >
+                        {m.message}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
 
           <div>

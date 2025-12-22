@@ -1,22 +1,17 @@
 """FastAPI server for simboba."""
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from simboba import storage
 from simboba.utils import LLMClient
-from simboba.prompts import (
-    build_dataset_generation_prompt,
-    build_generation_prompt,
-    build_generation_prompt_with_files,
-)
+from simboba.prompts import build_dataset_generation_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -76,18 +71,6 @@ class BulkCreateCases(BaseModel):
 
 class GenerateDatasetRequest(BaseModel):
     product_description: str
-
-
-class GenerateRequest(BaseModel):
-    dataset_name: str
-    agent_description: str
-    num_cases: int = 5
-    complexity: str = "mixed"
-
-
-class AcceptCasesRequest(BaseModel):
-    dataset_name: str
-    cases: list[dict]
 
 
 # --- App Factory ---
@@ -360,95 +343,6 @@ def create_app() -> FastAPI:
         logger.info(f"Bulk created {len(created)} cases in dataset '{dataset['name']}'")
         return created
 
-    # --- Generation Routes ---
-
-    @app.post("/api/generate")
-    def generate_cases(data: GenerateRequest):
-        dataset = _get_dataset_by_name_or_id(data.dataset_name)
-        if not dataset:
-            raise HTTPException(status_code=404, detail="Dataset not found")
-
-        prompt = build_generation_prompt(data.agent_description, data.num_cases, data.complexity)
-        model = storage.get_setting("model")
-        try:
-            client = LLMClient(model=model)
-            response = client.generate(prompt)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-        cases = _parse_generated_cases(response)
-
-        return {
-            "cases": cases,
-            "message": f"Generated {len(cases)} cases. Review and accept the ones you want to add."
-        }
-
-    @app.post("/api/generate/with-files")
-    async def generate_cases_with_files(
-        dataset_name: str = Form(...),
-        agent_description: str = Form(...),
-        num_cases: int = Form(5),
-        complexity: str = Form("mixed"),
-        files: list[UploadFile] = File(...),
-    ):
-        """Generate test cases using uploaded files as reference material."""
-        dataset = _get_dataset_by_name_or_id(dataset_name)
-        if not dataset:
-            raise HTTPException(status_code=404, detail="Dataset not found")
-
-        if not files:
-            raise HTTPException(status_code=400, detail="At least one file is required")
-
-        # Extract text from all uploaded files
-        files_data = []
-        for file in files:
-            if not file.filename.lower().endswith('.pdf'):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Only PDF files are supported. Got: {file.filename}"
-                )
-            content = await file.read()
-            pages = _extract_pdf_text(content, file.filename)
-            files_data.append({
-                "filename": file.filename,
-                "pages": pages
-            })
-
-        # Build prompt with file contents
-        file_contents = _format_file_contents(files_data)
-        prompt = build_generation_prompt_with_files(
-            agent_description, num_cases, complexity, file_contents
-        )
-
-        model = storage.get_setting("model")
-        try:
-            client = LLMClient(model=model)
-            response = client.generate(prompt)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-        cases = _parse_generated_cases(response)
-
-        return {
-            "cases": cases,
-            "files": [f["filename"] for f in files_data],
-            "message": f"Generated {len(cases)} cases from {len(files_data)} file(s). Review and accept the ones you want to add."
-        }
-
-    @app.post("/api/generate/accept")
-    def accept_cases(data: AcceptCasesRequest):
-        dataset = _get_dataset_by_name_or_id(data.dataset_name)
-        if not dataset:
-            raise HTTPException(status_code=404, detail="Dataset not found")
-
-        created = []
-        for case_data in data.cases:
-            case = storage.add_case(dataset["name"], case_data)
-            created.append(case)
-
-        return {
-            "cases": created,
-            "message": f"Added {len(created)} cases to dataset '{data.dataset_name}'"
-        }
-
     # --- Eval Run Routes ---
     # Runs are stored by dataset_id (UUID), not name
 
@@ -581,61 +475,6 @@ def create_app() -> FastAPI:
         raise HTTPException(status_code=404, detail="Not found")
 
     return app
-
-
-# --- Generation Helpers ---
-
-def _extract_pdf_text(file_content: bytes, filename: str) -> list[dict]:
-    """Extract text from PDF, returning list of {page, text} dicts."""
-    try:
-        from pypdf import PdfReader
-        import io
-    except ImportError:
-        raise HTTPException(status_code=500, detail="pypdf package not installed")
-
-    try:
-        reader = PdfReader(io.BytesIO(file_content))
-        pages = []
-        for i, page in enumerate(reader.pages, start=1):
-            text = page.extract_text() or ""
-            if text.strip():
-                pages.append({"page": i, "text": text.strip()})
-        return pages
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read PDF '{filename}': {e}")
-
-
-def _format_file_contents(files_data: list[dict]) -> str:
-    """Format extracted file contents for the prompt."""
-    parts = []
-    for file_data in files_data:
-        filename = file_data["filename"]
-        pages = file_data["pages"]
-        parts.append(f"=== {filename} ===")
-        for page_data in pages:
-            parts.append(f"--- Page {page_data['page']} ---")
-            parts.append(page_data["text"])
-            parts.append("")
-    return "\n".join(parts)
-
-
-def _parse_generated_cases(response: str) -> list[dict]:
-    text = response.strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    elif text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    text = text.strip()
-
-    try:
-        cases = json.loads(text)
-        if not isinstance(cases, list):
-            raise ValueError("Response is not a list")
-        return cases
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse generated cases: {e}")
 
 
 # Create the app instance

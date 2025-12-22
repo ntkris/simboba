@@ -165,6 +165,7 @@ your-project/
 
 ## Future Updates
 
+- **File Uploads** - Allow uploads via UI to help create datasets
 - **Eval methods** - Built-in evaluation strategies beyond LLM-as-judge
 - **Cloud storage** - Sync datasets and runs to the cloud for team collaboration
 

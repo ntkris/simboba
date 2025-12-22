@@ -141,9 +141,6 @@ result = boba.run(
 | `/api/cases` | GET, POST | List/create cases |
 | `/api/cases/{dataset}/{id}` | GET, PUT, DELETE | CRUD for single case |
 | `/api/cases/bulk` | POST | Bulk create cases |
-| `/api/generate` | POST | Generate synthetic cases |
-| `/api/generate/with-files` | POST | Generate from PDF files |
-| `/api/generate/accept` | POST | Accept generated cases |
 | `/api/runs` | GET | List runs |
 | `/api/runs/{dataset}/{filename}` | GET, DELETE | Get/delete run |
 | `/api/baselines` | GET | List baselines |

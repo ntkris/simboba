@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
+import { User, Bot } from 'lucide-react'
 import { useStore } from '@/hooks/useStore'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -345,24 +346,62 @@ function ResultItem({
 
       {expanded && (
         <div className="px-3.5 py-3.5 bg-zinc-50 border-t border-zinc-100">
-          {/* Conversation */}
-          {inputs.length > 0 && (
+          {/* Conversation + Actual Output */}
+          {(inputs.length > 0 || result.actual_output) && (
             <div className="mb-4">
               <div className="text-xs font-medium uppercase tracking-wide text-zinc-400 mb-2">
                 Conversation
               </div>
-              {inputs.map((m, i) => (
-                <div key={i} className="flex gap-3 mb-3 last:mb-0">
-                  <span
-                    className={`text-xs font-semibold uppercase px-2 py-1 min-w-[70px] text-center shrink-0 ${
-                      m.role === 'user' ? 'bg-taro/10 text-taro' : 'bg-zinc-100 text-zinc-600'
-                    }`}
-                  >
-                    {m.role}
-                  </span>
-                  <div className="text-sm leading-relaxed">{m.message}</div>
-                </div>
-              ))}
+              <div className="space-y-2">
+                {inputs.map((m, i) => {
+                  const isUser = m.role === 'user'
+                  return (
+                    <div
+                      key={i}
+                      className={`flex ${isUser ? 'justify-start' : 'justify-end'}`}
+                    >
+                      <div
+                        className={`flex items-start gap-2 max-w-[85%] ${
+                          isUser ? 'flex-row' : 'flex-row-reverse'
+                        }`}
+                      >
+                        <div
+                          className={`shrink-0 w-6 h-6 flex items-center justify-center ${
+                            isUser ? 'bg-taro/10 text-taro' : 'bg-zinc-200 text-zinc-600'
+                          }`}
+                        >
+                          {isUser ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
+                        </div>
+                        <div
+                          className={`px-2.5 py-1.5 text-sm leading-relaxed ${
+                            isUser ? 'bg-taro/10 text-zinc-900' : 'bg-zinc-200 text-zinc-900'
+                          }`}
+                        >
+                          {m.message}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+                {/* Actual Output as final agent message */}
+                {result.actual_output && (
+                  <div className="flex justify-end">
+                    <div className="flex items-start gap-2 max-w-[85%] flex-row-reverse">
+                      <div className="shrink-0 w-6 h-6 flex items-center justify-center bg-zinc-200 text-zinc-600">
+                        <Bot className="w-3.5 h-3.5" />
+                      </div>
+                      <div
+                        className={cn(
+                          'px-2.5 py-1.5 text-sm leading-relaxed bg-zinc-200 text-zinc-900 border',
+                          result.passed ? 'border-green-400' : 'border-red-400'
+                        )}
+                      >
+                        {result.actual_output}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -372,21 +411,6 @@ function ResultItem({
               Expected Outcome
             </div>
             <div className="p-3 bg-white border border-zinc-200 text-sm">{expectedOutcome}</div>
-          </div>
-
-          {/* Actual Output */}
-          <div className="mb-4">
-            <div className="text-xs font-medium uppercase tracking-wide text-zinc-400 mb-2">
-              Actual Output
-            </div>
-            <div
-              className={cn(
-                'p-3 bg-white text-sm border-l-[3px]',
-                result.passed ? 'border-l-green-500' : 'border-l-red-500'
-              )}
-            >
-              {result.actual_output || '—'}
-            </div>
           </div>
 
           {/* Judge Reasoning */}
