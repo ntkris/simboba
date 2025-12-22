@@ -16,26 +16,20 @@ Usage:
 from datetime import datetime
 from typing import Callable, Optional
 
-from simboba.database import init_db, get_session_factory
-from simboba.models import Dataset, EvalRun, EvalResult, Settings
+from simboba import storage
 
 
 class Boba:
     """Simple eval tracking."""
 
     def __init__(self):
-        """Initialize Boba and connect to database."""
-        init_db()
-        self._session_factory = get_session_factory()
+        """Initialize Boba."""
+        self._warned_simple_judge = False
 
-    def _get_session(self):
-        return self._session_factory()
-
-    def _get_judge(self, db, warn: bool = True):
+    def _get_judge(self, warn: bool = True):
         """Get the judge function.
 
         Args:
-            db: Database session
             warn: Whether to print a warning if falling back to simple judge
 
         Returns:
@@ -43,16 +37,19 @@ class Boba:
         """
         try:
             from simboba.judge import create_judge
-            model = Settings.get(db, "model")
+            model = storage.get_setting("model")
             return create_judge(model=model)
         except Exception:
-            if warn and not getattr(self, '_warned_simple_judge', False):
-                print("\n⚠️  No API key found. Using simple keyword-matching judge.")
+            if warn and not self._warned_simple_judge:
+                print("\n  No API key found. Using simple keyword-matching judge.")
                 print("   For better results, set ANTHROPIC_API_KEY in your environment.")
                 print("   See: https://console.anthropic.com/\n")
                 self._warned_simple_judge = True
             from simboba.judge import create_simple_judge
             return create_simple_judge()
+
+    # Fixed ID for ad-hoc evals (not part of a dataset)
+    ADHOC_DATASET_ID = "_adhoc"
 
     def eval(
         self,
@@ -73,54 +70,52 @@ class Boba:
         Returns:
             dict with: passed, reasoning, run_id
         """
-        db = self._get_session()
+        # Create run record
+        run = {
+            "dataset_id": self.ADHOC_DATASET_ID,
+            "dataset_name": "_adhoc",
+            "eval_name": name or "single-eval",
+            "status": "running",
+            "total": 1,
+            "passed": 0,
+            "failed": 0,
+            "started_at": datetime.now().isoformat(),
+            "results": {},
+        }
 
-        try:
-            # Create run record
-            run = EvalRun(
-                dataset_id=None,
-                eval_name=name or "single-eval",
-                status="running",
-                total=1,
-            )
-            db.add(run)
-            db.flush()
+        # Judge the result
+        judge_fn = self._get_judge()
+        inputs = [{"role": "user", "message": input}]
+        passed, reasoning = judge_fn(inputs, expected, output)
 
-            # Judge the result
-            judge_fn = self._get_judge(db)
-            inputs = [{"role": "user", "message": input}]
-            passed, reasoning = judge_fn(inputs, expected, output)
+        # Create result
+        case_id = storage.generate_id()
+        run["results"][case_id] = {
+            "case_id": case_id,
+            "inputs": inputs,
+            "expected_outcome": expected,
+            "passed": passed,
+            "actual_output": output,
+            "judgment": "PASS" if passed else "FAIL",
+            "reasoning": reasoning,
+            "created_at": datetime.now().isoformat(),
+        }
 
-            # Create result record
-            result = EvalResult(
-                run_id=run.id,
-                case_id=None,
-                inputs=inputs,
-                expected_outcome=expected,
-                passed=passed,
-                actual_output=output,
-                judgment="PASS" if passed else "FAIL",
-                reasoning=reasoning,
-            )
-            db.add(result)
+        # Update run
+        run["status"] = "completed"
+        run["passed"] = 1 if passed else 0
+        run["failed"] = 0 if passed else 1
+        run["score"] = 100.0 if passed else 0.0
+        run["completed_at"] = datetime.now().isoformat()
 
-            # Update run
-            run.status = "completed"
-            run.passed = 1 if passed else 0
-            run.failed = 0 if passed else 1
-            run.score = 100.0 if passed else 0.0
-            run.completed_at = datetime.utcnow()
+        # Save run using the ad-hoc dataset ID
+        saved_run = storage.save_run(self.ADHOC_DATASET_ID, run)
 
-            db.commit()
-
-            return {
-                "passed": passed,
-                "reasoning": reasoning,
-                "run_id": run.id,
-            }
-
-        finally:
-            db.close()
+        return {
+            "passed": passed,
+            "reasoning": reasoning,
+            "run_id": saved_run["filename"],
+        }
 
     def run(
         self,
@@ -137,103 +132,137 @@ class Boba:
             name: Optional name for this run
 
         Returns:
-            dict with: passed, failed, total, score, run_id
+            dict with: passed, failed, total, score, run_id, regressions, fixes
         """
-        db = self._get_session()
+        # Load dataset
+        ds = storage.get_dataset(dataset)
+        if not ds:
+            raise ValueError(f"Dataset '{dataset}' not found")
 
-        try:
-            # Load dataset
-            ds = db.query(Dataset).filter(Dataset.name == dataset).first()
-            if not ds:
-                raise ValueError(f"Dataset '{dataset}' not found")
+        dataset_id = ds["id"]
+        dataset_name = ds["name"]
 
-            cases = ds.cases
-            if not cases:
-                raise ValueError(f"Dataset '{dataset}' has no cases")
+        cases = ds.get("cases", [])
+        if not cases:
+            raise ValueError(f"Dataset '{dataset}' has no cases")
 
-            # Create run record
-            run = EvalRun(
-                dataset_id=ds.id,
-                eval_name=name or f"eval-{dataset}",
-                status="running",
-                total=len(cases),
-            )
-            db.add(run)
-            db.flush()
+        # Create run record
+        run = {
+            "dataset_id": dataset_id,
+            "dataset_name": dataset_name,
+            "eval_name": name or f"eval-{dataset_name}",
+            "status": "running",
+            "total": len(cases),
+            "passed": 0,
+            "failed": 0,
+            "started_at": datetime.now().isoformat(),
+            "results": {},
+        }
 
-            # Get judge
-            judge_fn = self._get_judge(db)
+        # Save initial run state (using dataset ID)
+        run = storage.save_run(dataset_id, run)
 
-            # Run each case
-            passed_count = 0
-            failed_count = 0
+        # Get judge
+        judge_fn = self._get_judge()
 
-            for case in cases:
-                # Get input message (last user message)
-                inputs = case.inputs
-                if inputs and len(inputs) > 0:
-                    last_message = inputs[-1].get("message", "")
-                else:
-                    last_message = ""
+        # Run each case
+        passed_count = 0
+        failed_count = 0
 
-                # Call agent
-                try:
-                    output = agent(last_message)
-                    error_message = None
-                except Exception as e:
-                    output = None
-                    error_message = str(e)
+        for case in cases:
+            case_id = case.get("id", storage.generate_id())
 
-                # Judge if no error
-                if error_message:
-                    passed = False
-                    reasoning = f"Error: {error_message}"
-                else:
-                    passed, reasoning = judge_fn(inputs, case.expected_outcome, output)
+            # Get input message (last user message)
+            inputs = case.get("inputs", [])
+            if inputs and len(inputs) > 0:
+                last_message = inputs[-1].get("message", "")
+            else:
+                last_message = ""
 
-                # Create result record
-                result = EvalResult(
-                    run_id=run.id,
-                    case_id=case.id,
-                    passed=passed,
-                    actual_output=str(output) if output else None,
-                    judgment="PASS" if passed else "FAIL",
-                    reasoning=reasoning,
-                    error_message=error_message,
-                )
-                db.add(result)
+            # Call agent
+            try:
+                output = agent(last_message)
+                error_message = None
+            except Exception as e:
+                output = None
+                error_message = str(e)
 
-                if passed:
-                    passed_count += 1
-                else:
-                    failed_count += 1
+            # Judge if no error
+            if error_message:
+                passed = False
+                reasoning = f"Error: {error_message}"
+            else:
+                passed, reasoning = judge_fn(inputs, case.get("expected_outcome", ""), output)
 
-                # Update run incrementally
-                run.passed = passed_count
-                run.failed = failed_count
-                db.flush()
-
-                # Print progress
-                status = "✓" if passed else "✗"
-                case_name = case.name or f"Case {case.id}"
-                print(f"  {status} {case_name}")
-
-            # Finalize run
-            run.status = "completed"
-            run.score = (passed_count / len(cases) * 100) if cases else 0.0
-            run.completed_at = datetime.utcnow()
-
-            db.commit()
-
-            print(f"\nResults: {passed_count}/{len(cases)} passed ({run.score:.1f}%)")
-
-            return {
-                "passed": passed_count,
-                "failed": failed_count,
-                "total": len(cases),
-                "score": run.score,
-                "run_id": run.id,
+            # Create result
+            run["results"][case_id] = {
+                "case_id": case_id,
+                "passed": passed,
+                "actual_output": str(output) if output else None,
+                "judgment": "PASS" if passed else "FAIL",
+                "reasoning": reasoning,
+                "error_message": error_message,
+                "created_at": datetime.now().isoformat(),
+                "case": {
+                    "id": case_id,
+                    "name": case.get("name"),
+                    "inputs": inputs,
+                    "expected_outcome": case.get("expected_outcome", ""),
+                },
             }
 
-        finally:
-            db.close()
+            if passed:
+                passed_count += 1
+            else:
+                failed_count += 1
+
+            # Update run incrementally
+            run["passed"] = passed_count
+            run["failed"] = failed_count
+
+            # Save run after each case (atomic write)
+            storage.save_run(dataset_id, run)
+
+            # Print progress
+            status = "+" if passed else "x"
+            case_name = case.get("name") or f"Case {case_id[:8]}"
+            print(f"  {status} {case_name}")
+
+        # Finalize run
+        run["status"] = "completed"
+        run["score"] = (passed_count / len(cases) * 100) if cases else 0.0
+        run["completed_at"] = datetime.now().isoformat()
+
+        storage.save_run(dataset_id, run)
+
+        # Compare to baseline (using dataset ID)
+        baseline = storage.get_baseline(dataset_id)
+        comparison = storage.compare_run_to_baseline(run, baseline)
+
+        # Print results
+        print(f"\nResults: {passed_count}/{len(cases)} passed ({run['score']:.1f}%)")
+
+        if comparison["has_baseline"]:
+            if comparison["regressions"]:
+                print(f"\n  REGRESSIONS: {len(comparison['regressions'])} cases now failing")
+                for case_id in comparison["regressions"][:5]:
+                    result = run["results"].get(case_id, {})
+                    case_name = result.get("case", {}).get("name") or case_id[:8]
+                    print(f"    - {case_name}")
+                if len(comparison["regressions"]) > 5:
+                    print(f"    ... and {len(comparison['regressions']) - 5} more")
+
+            if comparison["fixes"]:
+                print(f"\n  FIXES: {len(comparison['fixes'])} cases now passing")
+        else:
+            print("\n  No baseline found. Run 'boba baseline' to save current results as baseline.")
+
+        return {
+            "passed": passed_count,
+            "failed": failed_count,
+            "total": len(cases),
+            "score": run["score"],
+            "run_id": run["filename"],
+            "regressions": comparison["regressions"],
+            "fixes": comparison["fixes"],
+        }

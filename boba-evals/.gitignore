@@ -1,2 +1,2 @@
-# boba database
-*.db
+# Boba eval runs (ephemeral, not committed)
+runs/

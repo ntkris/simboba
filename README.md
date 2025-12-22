@@ -12,7 +12,7 @@
     '---'
 ```
 
-Lightweight eval tracking with LLM-as-judge. Run evals as Python scripts, track results in a web UI.
+Lightweight eval tracking with LLM-as-judge. Run evals as Python scripts, track results as git-friendly JSON files, view in a web UI.
 
 ## Installation
 
@@ -26,6 +26,7 @@ pip install simboba
 boba init          # Create boba-evals/ folder with templates
 boba magic         # Print AI prompt to help configure your evals
 boba run           # Run your evals (handles Docker automatically)
+boba baseline      # Save run as baseline for regression detection
 boba serve         # View results at http://localhost:8787
 ```
 
@@ -35,12 +36,12 @@ boba serve         # View results at http://localhost:8787
 |---------|-------------|
 | `boba init` | Create `boba-evals/` folder with starter templates |
 | `boba magic` | Print detailed AI prompt to configure your eval scripts |
-| `boba setup` | Print basic setup instructions |
 | `boba run [script]` | Run eval script (default: `test_chat.py`). Handles Docker automatically |
+| `boba baseline` | Save a run as baseline for regression detection |
 | `boba serve` | Start web UI to view results |
 | `boba datasets` | List all datasets |
 | `boba generate "description"` | Generate a dataset from a description |
-| `boba reset` | Delete database |
+| `boba reset` | Clear run history (keeps datasets and baselines) |
 
 ## Writing Evals
 
@@ -78,6 +79,22 @@ if __name__ == "__main__":
         cleanup()
 ```
 
+## Regression Detection
+
+Track regressions across code changes:
+
+```bash
+# Run evals and compare to baseline
+boba run
+# Output shows regressions: "REGRESSIONS: 2 cases now failing"
+
+# Save current results as new baseline
+boba baseline
+# Commit to git for tracking
+git add boba-evals/baselines/
+git commit -m "Update eval baseline"
+```
+
 ## Creating Datasets
 
 ### Via CLI
@@ -87,7 +104,7 @@ boba generate "A customer support chatbot for an e-commerce site"
 
 ### Via Web UI
 1. `boba serve`
-2. Click "New Dataset" → "Generate with AI"
+2. Click "New Dataset" -> "Generate with AI"
 3. Enter a description of your agent
 
 ### Via API
@@ -132,10 +149,14 @@ GEMINI_API_KEY=...             # For Gemini models
 ```
 your-project/
 ├── boba-evals/
-│   ├── setup.py        # Test fixtures
-│   ├── test_chat.py    # Your eval script
-│   ├── .boba.yaml      # Config (docker vs local)
-│   └── simboba.db      # Results database
+│   ├── datasets/           # Dataset JSON files (git tracked)
+│   ├── baselines/          # Baseline results (git tracked)
+│   ├── runs/               # Run history (gitignored)
+│   ├── files/              # Uploaded attachments
+│   ├── setup.py            # Test fixtures
+│   ├── test_chat.py        # Your eval script
+│   ├── settings.json       # Configuration
+│   └── .boba.yaml          # Runtime config (docker vs local)
 └── ...
 ```
 

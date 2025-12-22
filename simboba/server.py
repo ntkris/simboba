@@ -4,38 +4,23 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional
-from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Query, File, UploadFile, Form
-
-logger = logging.getLogger(__name__)
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
 
-from simboba.database import init_db, get_session_factory
-from simboba.models import Dataset, EvalCase, EvalRun, EvalResult, Settings
-from simboba.utils.models import LLMClient
+from simboba import storage
+from simboba.utils import LLMClient
 from simboba.prompts import (
     build_dataset_generation_prompt,
     build_generation_prompt,
     build_generation_prompt_with_files,
 )
 
+logger = logging.getLogger(__name__)
+
 STATIC_DIR = Path(__file__).parent / "static"
-
-
-# --- Database Dependency ---
-
-def get_db():
-    """Get a database session."""
-    SessionLocal = get_session_factory()
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 # --- Request/Response Models ---
@@ -66,11 +51,11 @@ class MessageInput(BaseModel):
 class ExpectedSource(BaseModel):
     file: str
     page: int
-    excerpt: Optional[str] = None  # optional snippet for quick reference
+    excerpt: Optional[str] = None
 
 
 class CaseCreate(BaseModel):
-    dataset_id: int
+    dataset_name: str
     name: Optional[str] = None
     inputs: list[MessageInput]
     expected_outcome: str
@@ -85,7 +70,7 @@ class CaseUpdate(BaseModel):
 
 
 class BulkCreateCases(BaseModel):
-    dataset_id: int
+    dataset_name: str
     cases: list[dict]
 
 
@@ -94,33 +79,25 @@ class GenerateDatasetRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    dataset_id: int
+    dataset_name: str
     agent_description: str
     num_cases: int = 5
     complexity: str = "mixed"
 
 
 class AcceptCasesRequest(BaseModel):
-    dataset_id: int
+    dataset_name: str
     cases: list[dict]
 
 
 # --- App Factory ---
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Initialize database on startup."""
-    init_db()
-    yield
-
 
 def create_app() -> FastAPI:
     """Create the FastAPI application."""
     app = FastAPI(
         title="Simboba",
         description="Eval dataset generation and LLM-as-judge evaluations",
-        version="0.1.0",
-        lifespan=lifespan,
+        version="0.2.0",
     )
 
     # --- Health & UI Routes ---
@@ -139,91 +116,84 @@ def create_app() -> FastAPI:
     # --- Dataset Routes ---
 
     @app.get("/api/datasets")
-    def list_datasets(db: Session = Depends(get_db)):
-        datasets = db.query(Dataset).order_by(Dataset.updated_at.desc()).all()
-        return [d.to_dict() for d in datasets]
+    def list_datasets():
+        datasets = storage.list_datasets()
+        return datasets
 
     @app.post("/api/datasets")
-    def create_dataset(data: DatasetCreate, db: Session = Depends(get_db)):
-        existing = db.query(Dataset).filter(Dataset.name == data.name).first()
-        if existing:
+    def create_dataset(data: DatasetCreate):
+        if storage.dataset_exists(data.name):
             raise HTTPException(status_code=400, detail="Dataset with this name already exists")
-        dataset = Dataset(name=data.name, description=data.description)
-        db.add(dataset)
-        db.commit()
-        db.refresh(dataset)
-        return dataset.to_dict()
+        dataset = {
+            "name": data.name,
+            "description": data.description,
+            "cases": [],
+        }
+        return storage.save_dataset(dataset)
 
-    @app.get("/api/datasets/{dataset_id}")
-    def get_dataset(dataset_id: int, db: Session = Depends(get_db)):
-        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    @app.get("/api/datasets/{dataset_name}")
+    def get_dataset(dataset_name: str):
+        dataset = storage.get_dataset(dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
-        return dataset.to_dict()
+        return dataset
 
-    @app.put("/api/datasets/{dataset_id}")
-    def update_dataset(dataset_id: int, data: DatasetUpdate, db: Session = Depends(get_db)):
-        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    @app.put("/api/datasets/{dataset_name}")
+    def update_dataset(dataset_name: str, data: DatasetUpdate):
+        dataset = storage.get_dataset(dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
-        if data.name is not None:
-            existing = db.query(Dataset).filter(Dataset.name == data.name, Dataset.id != dataset_id).first()
-            if existing:
-                raise HTTPException(status_code=400, detail="Dataset with this name already exists")
-            dataset.name = data.name
+
+        # Handle rename using the rename_dataset function (preserves UUID)
+        if data.name is not None and data.name != dataset_name:
+            try:
+                dataset = storage.rename_dataset(dataset_name, data.name)
+                if not dataset:
+                    raise HTTPException(status_code=404, detail="Dataset not found")
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         if data.description is not None:
-            dataset.description = data.description
-        db.commit()
-        db.refresh(dataset)
-        return dataset.to_dict()
+            dataset["description"] = data.description
+            dataset = storage.save_dataset(dataset)
 
-    @app.delete("/api/datasets/{dataset_id}")
-    def delete_dataset(dataset_id: int, db: Session = Depends(get_db)):
-        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-        if not dataset:
+        return dataset
+
+    @app.delete("/api/datasets/{dataset_name}")
+    def delete_dataset(dataset_name: str):
+        if not storage.delete_dataset(dataset_name):
             raise HTTPException(status_code=404, detail="Dataset not found")
-        db.delete(dataset)
-        db.commit()
         return {"message": "Dataset deleted"}
 
-    @app.get("/api/datasets/{dataset_id}/export")
-    def export_dataset(dataset_id: int, db: Session = Depends(get_db)):
-        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    @app.get("/api/datasets/{dataset_name}/export")
+    def export_dataset(dataset_name: str):
+        dataset = storage.get_dataset(dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
         return {
-            "name": dataset.name,
-            "description": dataset.description,
-            "cases": [case.to_dict() for case in dataset.cases],
+            "name": dataset["name"],
+            "description": dataset.get("description"),
+            "cases": dataset.get("cases", []),
         }
 
     @app.post("/api/datasets/import")
-    def import_dataset(data: DatasetImport, db: Session = Depends(get_db)):
-        existing = db.query(Dataset).filter(Dataset.name == data.name).first()
-        if existing:
+    def import_dataset(data: DatasetImport):
+        if storage.dataset_exists(data.name):
             raise HTTPException(status_code=400, detail="Dataset with this name already exists")
-        dataset = Dataset(name=data.name, description=data.description)
-        db.add(dataset)
-        db.flush()
-        for case_data in data.cases:
-            case = EvalCase(
-                dataset_id=dataset.id,
-                name=case_data.get("name"),
-                inputs=case_data.get("inputs", []),
-                expected_outcome=case_data.get("expected_outcome", ""),
-            )
-            db.add(case)
-        db.commit()
-        db.refresh(dataset)
-        return dataset.to_dict()
+        dataset = {
+            "name": data.name,
+            "description": data.description,
+            "cases": data.cases,
+        }
+        return storage.save_dataset(dataset)
 
     @app.post("/api/datasets/generate")
-    def generate_dataset(data: GenerateDatasetRequest, db: Session = Depends(get_db)):
+    def generate_dataset(data: GenerateDatasetRequest):
         """Generate a complete dataset from a product description."""
         import traceback
         try:
             prompt = build_dataset_generation_prompt(data.product_description)
-            model = Settings.get(db, "model")
+            model = storage.get_setting("model")
             print(f"[generate_dataset] Using model: {model}")
 
             client = LLMClient(model=model)
@@ -244,125 +214,107 @@ def create_app() -> FastAPI:
 
         # Check for duplicate name
         name = result["name"]
-        existing = db.query(Dataset).filter(Dataset.name == name).first()
-        if existing:
-            # Append a number to make it unique
+        if storage.dataset_exists(name):
             i = 1
-            while db.query(Dataset).filter(Dataset.name == f"{name}-{i}").first():
+            while storage.dataset_exists(f"{name}-{i}"):
                 i += 1
             name = f"{name}-{i}"
 
         # Create the dataset
-        dataset = Dataset(name=name, description=result.get("description", ""))
-        db.add(dataset)
-        db.flush()
-
-        # Create the cases
-        for case_data in result["cases"]:
-            case = EvalCase(
-                dataset_id=dataset.id,
-                name=case_data.get("name"),
-                inputs=case_data.get("inputs", []),
-                expected_outcome=case_data.get("expected_outcome", ""),
-                expected_source=case_data.get("expected_source"),
-            )
-            db.add(case)
-
-        db.commit()
-        db.refresh(dataset)
-        return dataset.to_dict()
+        dataset = {
+            "name": name,
+            "description": result.get("description", ""),
+            "cases": result.get("cases", []),
+        }
+        return storage.save_dataset(dataset)
 
     # --- Case Routes ---
 
     @app.get("/api/cases")
-    def list_cases(dataset_id: Optional[int] = Query(None), db: Session = Depends(get_db)):
-        query = db.query(EvalCase)
-        if dataset_id is not None:
-            query = query.filter(EvalCase.dataset_id == dataset_id)
-        cases = query.order_by(EvalCase.created_at.desc()).all()
-        return [c.to_dict() for c in cases]
+    def list_cases(dataset_name: Optional[str] = Query(None)):
+        if dataset_name:
+            dataset = storage.get_dataset(dataset_name)
+            if not dataset:
+                raise HTTPException(status_code=404, detail="Dataset not found")
+            cases = dataset.get("cases", [])
+            for case in cases:
+                case["dataset_name"] = dataset_name
+            return cases
+        else:
+            # Return all cases from all datasets
+            all_cases = []
+            for dataset in storage.list_datasets():
+                for case in dataset.get("cases", []):
+                    case["dataset_name"] = dataset["name"]
+                    all_cases.append(case)
+            return all_cases
 
     @app.post("/api/cases")
-    def create_case(data: CaseCreate, db: Session = Depends(get_db)):
-        dataset = db.query(Dataset).filter(Dataset.id == data.dataset_id).first()
+    def create_case(data: CaseCreate):
+        dataset = storage.get_dataset(data.dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
-        inputs = [msg.model_dump() for msg in data.inputs]
-        case = EvalCase(
-            dataset_id=data.dataset_id,
-            name=data.name,
-            inputs=inputs,
-            expected_outcome=data.expected_outcome,
-            expected_source=data.expected_source.model_dump() if data.expected_source else None,
-        )
-        db.add(case)
-        db.commit()
-        db.refresh(case)
-        return case.to_dict()
 
-    @app.get("/api/cases/{case_id}")
-    def get_case(case_id: int, db: Session = Depends(get_db)):
-        case = db.query(EvalCase).filter(EvalCase.id == case_id).first()
+        case = {
+            "name": data.name,
+            "inputs": [msg.model_dump() for msg in data.inputs],
+            "expected_outcome": data.expected_outcome,
+            "expected_source": data.expected_source.model_dump() if data.expected_source else None,
+        }
+        return storage.add_case(data.dataset_name, case)
+
+    @app.get("/api/cases/{dataset_name}/{case_id}")
+    def get_case(dataset_name: str, case_id: str):
+        case = storage.get_case(dataset_name, case_id)
         if not case:
             raise HTTPException(status_code=404, detail="Case not found")
-        return case.to_dict()
+        return case
 
-    @app.put("/api/cases/{case_id}")
-    def update_case(case_id: int, data: CaseUpdate, db: Session = Depends(get_db)):
-        case = db.query(EvalCase).filter(EvalCase.id == case_id).first()
-        if not case:
-            raise HTTPException(status_code=404, detail="Case not found")
+    @app.put("/api/cases/{dataset_name}/{case_id}")
+    def update_case(dataset_name: str, case_id: str, data: CaseUpdate):
+        updates = {}
         if data.name is not None:
-            case.name = data.name
+            updates["name"] = data.name
         if data.inputs is not None:
-            case.inputs = [msg.model_dump() for msg in data.inputs]
+            updates["inputs"] = [msg.model_dump() for msg in data.inputs]
         if data.expected_outcome is not None:
-            case.expected_outcome = data.expected_outcome
+            updates["expected_outcome"] = data.expected_outcome
         if data.expected_source is not None:
-            case.expected_source = data.expected_source.model_dump()
-        db.commit()
-        db.refresh(case)
-        return case.to_dict()
+            updates["expected_source"] = data.expected_source.model_dump()
 
-    @app.delete("/api/cases/{case_id}")
-    def delete_case(case_id: int, db: Session = Depends(get_db)):
-        case = db.query(EvalCase).filter(EvalCase.id == case_id).first()
+        case = storage.update_case(dataset_name, case_id, updates)
         if not case:
             raise HTTPException(status_code=404, detail="Case not found")
-        db.delete(case)
-        db.commit()
+        return case
+
+    @app.delete("/api/cases/{dataset_name}/{case_id}")
+    def delete_case(dataset_name: str, case_id: str):
+        if not storage.delete_case(dataset_name, case_id):
+            raise HTTPException(status_code=404, detail="Case not found")
         return {"message": "Case deleted"}
 
     @app.post("/api/cases/bulk")
-    def bulk_create_cases(data: BulkCreateCases, db: Session = Depends(get_db)):
-        dataset = db.query(Dataset).filter(Dataset.id == data.dataset_id).first()
+    def bulk_create_cases(data: BulkCreateCases):
+        dataset = storage.get_dataset(data.dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
+
         created = []
         for case_data in data.cases:
-            case = EvalCase(
-                dataset_id=data.dataset_id,
-                name=case_data.get("name"),
-                inputs=case_data.get("inputs", []),
-                expected_outcome=case_data.get("expected_outcome", ""),
-            )
-            db.add(case)
+            case = storage.add_case(data.dataset_name, case_data)
             created.append(case)
-        db.commit()
-        for case in created:
-            db.refresh(case)
-        return [c.to_dict() for c in created]
+        return created
 
     # --- Generation Routes ---
 
     @app.post("/api/generate")
-    def generate_cases(data: GenerateRequest, db: Session = Depends(get_db)):
-        dataset = db.query(Dataset).filter(Dataset.id == data.dataset_id).first()
+    def generate_cases(data: GenerateRequest):
+        dataset = storage.get_dataset(data.dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
 
         prompt = build_generation_prompt(data.agent_description, data.num_cases, data.complexity)
-        model = Settings.get(db, "model")
+        model = storage.get_setting("model")
         try:
             client = LLMClient(model=model)
             response = client.generate(prompt)
@@ -377,15 +329,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/generate/with-files")
     async def generate_cases_with_files(
-        dataset_id: int = Form(...),
+        dataset_name: str = Form(...),
         agent_description: str = Form(...),
         num_cases: int = Form(5),
         complexity: str = Form("mixed"),
         files: list[UploadFile] = File(...),
-        db: Session = Depends(get_db)
     ):
         """Generate test cases using uploaded files as reference material."""
-        dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        dataset = storage.get_dataset(dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -413,7 +364,7 @@ def create_app() -> FastAPI:
             agent_description, num_cases, complexity, file_contents
         )
 
-        model = Settings.get(db, "model")
+        model = storage.get_setting("model")
         try:
             client = LLMClient(model=model)
             response = client.generate(prompt)
@@ -428,243 +379,135 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/generate/accept")
-    def accept_cases(data: AcceptCasesRequest, db: Session = Depends(get_db)):
-        dataset = db.query(Dataset).filter(Dataset.id == data.dataset_id).first()
+    def accept_cases(data: AcceptCasesRequest):
+        dataset = storage.get_dataset(data.dataset_name)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found")
+
         created = []
         for case_data in data.cases:
-            # Handle expected_source if present
-            expected_source = case_data.get("expected_source")
-            case = EvalCase(
-                dataset_id=data.dataset_id,
-                name=case_data.get("name"),
-                inputs=case_data.get("inputs", []),
-                expected_outcome=case_data.get("expected_outcome", ""),
-                expected_source=expected_source,
-            )
-            db.add(case)
+            case = storage.add_case(data.dataset_name, case_data)
             created.append(case)
-        db.commit()
-        for case in created:
-            db.refresh(case)
+
         return {
-            "cases": [c.to_dict() for c in created],
-            "message": f"Added {len(created)} cases to dataset '{dataset.name}'"
+            "cases": created,
+            "message": f"Added {len(created)} cases to dataset '{data.dataset_name}'"
         }
 
     # --- Eval Run Routes ---
+    # Runs are stored by dataset_id (UUID), not name
 
     @app.get("/api/runs")
-    def list_runs(dataset_id: Optional[int] = Query(None), db: Session = Depends(get_db)):
-        """List eval runs, optionally filtered by dataset."""
-        query = db.query(EvalRun)
-        if dataset_id is not None:
-            query = query.filter(EvalRun.dataset_id == dataset_id)
-        runs = query.order_by(EvalRun.started_at.desc()).all()
-        return [r.to_dict() for r in runs]
+    def list_runs(dataset_id: Optional[str] = Query(None)):
+        """List eval runs, optionally filtered by dataset ID."""
+        runs = storage.list_runs(dataset_id)
 
-    @app.get("/api/runs/{run_id}")
-    def get_run(run_id: int, db: Session = Depends(get_db)):
+        # Enrich with dataset name for display
+        for run in runs:
+            ds_id = run.get("dataset_id")
+            if ds_id and ds_id != "_adhoc":
+                ds = storage.get_dataset_by_id(ds_id)
+                run["dataset_name"] = ds["name"] if ds else None
+
+        # Return summary without full results
+        return [
+            {
+                "dataset_id": r.get("dataset_id"),
+                "dataset_name": r.get("dataset_name"),
+                "filename": r.get("filename"),
+                "eval_name": r.get("eval_name"),
+                "status": r.get("status"),
+                "passed": r.get("passed"),
+                "failed": r.get("failed"),
+                "total": r.get("total"),
+                "score": r.get("score"),
+                "started_at": r.get("started_at"),
+                "completed_at": r.get("completed_at"),
+            }
+            for r in runs
+        ]
+
+    @app.get("/api/runs/{dataset_id}/{filename}")
+    def get_run(dataset_id: str, filename: str):
         """Get a specific eval run with results."""
-        run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
+        run = storage.get_run(dataset_id, filename)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
 
-        run_dict = run.to_dict()
-        run_dict["results"] = [r.to_dict() for r in run.results]
-        return run_dict
+        # Enrich with dataset name
+        if dataset_id != "_adhoc":
+            ds = storage.get_dataset_by_id(dataset_id)
+            run["dataset_name"] = ds["name"] if ds else None
 
-    @app.delete("/api/runs/{run_id}")
-    def delete_run(run_id: int, db: Session = Depends(get_db)):
+        return run
+
+    @app.delete("/api/runs/{dataset_id}/{filename}")
+    def delete_run(dataset_id: str, filename: str):
         """Delete an eval run."""
-        run = db.query(EvalRun).filter(EvalRun.id == run_id).first()
-        if not run:
+        if not storage.delete_run(dataset_id, filename):
             raise HTTPException(status_code=404, detail="Run not found")
-        db.delete(run)
-        db.commit()
         return {"message": "Run deleted"}
+
+    # --- Baseline Routes ---
+    # Baselines are stored by dataset_id (UUID), not name
+
+    @app.get("/api/baselines")
+    def list_baselines():
+        """List all baselines."""
+        baselines = storage.list_baselines()
+
+        # Enrich with dataset name for display
+        for baseline in baselines:
+            ds_id = baseline.get("dataset_id")
+            if ds_id:
+                ds = storage.get_dataset_by_id(ds_id)
+                baseline["dataset_name"] = ds["name"] if ds else None
+
+        return baselines
+
+    @app.get("/api/baselines/{dataset_id}")
+    def get_baseline(dataset_id: str):
+        """Get the baseline for a dataset by ID."""
+        baseline = storage.get_baseline(dataset_id)
+        if not baseline:
+            raise HTTPException(status_code=404, detail="Baseline not found")
+
+        # Enrich with dataset name
+        ds = storage.get_dataset_by_id(dataset_id)
+        baseline["dataset_name"] = ds["name"] if ds else None
+
+        return baseline
 
     # --- Settings Routes ---
 
     @app.get("/api/settings")
-    def get_settings(db: Session = Depends(get_db)):
+    def get_settings():
         """Get all settings."""
-        return Settings.get_all(db)
+        return storage.get_settings()
 
     @app.put("/api/settings")
-    def update_settings(updates: dict, db: Session = Depends(get_db)):
+    def update_settings(updates: dict):
         """Update settings."""
-        for key, value in updates.items():
-            Settings.set(db, key, value)
-        return Settings.get_all(db)
+        current = storage.get_settings()
+        current.update(updates)
+        return storage.save_settings(current)
 
-    # --- Playground Routes ---
+    # --- File Upload Routes ---
 
-    class PlaygroundQuery(BaseModel):
-        query: str
+    @app.post("/api/files/upload")
+    async def upload_file(file: UploadFile = File(...)):
+        """Upload a file for use in eval cases."""
+        content = await file.read()
+        filename = storage.save_file(file.filename, content)
+        return {"filename": filename, "message": f"Uploaded {filename}"}
 
-    class PlaygroundSQL(BaseModel):
-        sql: str
-
-    @app.post("/api/playground/sql")
-    def playground_sql(data: PlaygroundSQL, db: Session = Depends(get_db)):
-        """Execute a SQL query directly (for hardcoded example queries)."""
-        from sqlalchemy import text
-
-        sql = data.sql.strip()
-
-        # Safety check: only allow SELECT queries
-        sql_upper = sql.upper().strip()
-        if not sql_upper.startswith("SELECT"):
-            return {
-                "success": False,
-                "error": "Only SELECT queries are allowed",
-                "sql": sql,
-                "results": []
-            }
-
-        try:
-            result = db.execute(text(sql))
-            columns = list(result.keys())
-            rows = [dict(zip(columns, row)) for row in result.fetchall()]
-
-            return {
-                "success": True,
-                "sql": sql,
-                "columns": columns,
-                "results": rows
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-                "sql": sql,
-                "results": []
-            }
-
-    @app.post("/api/playground/query")
-    def playground_query(data: PlaygroundQuery, db: Session = Depends(get_db)):
-        """Execute a natural language query against the database."""
-        from sqlalchemy import text
-
-        # Get the model from settings
-        model = Settings.get(db, "model")
-
-        # Build the prompt for SQL generation
-        schema_description = """
-Database Schema:
-
-TABLE datasets (
-    id INTEGER PRIMARY KEY,
-    name VARCHAR(255) UNIQUE,
-    description TEXT,
-    created_at DATETIME,
-    updated_at DATETIME
-)
-
-TABLE eval_cases (
-    id INTEGER PRIMARY KEY,
-    dataset_id INTEGER REFERENCES datasets(id),
-    name VARCHAR(255),
-    inputs JSON,  -- List of {role, message, attachments}
-    expected_outcome TEXT,
-    expected_source JSON,  -- {file, page, excerpt}
-    created_at DATETIME,
-    updated_at DATETIME
-)
-
-TABLE eval_runs (
-    id INTEGER PRIMARY KEY,
-    dataset_id INTEGER REFERENCES datasets(id),
-    eval_name VARCHAR(255),
-    status VARCHAR(50),  -- pending, running, completed, failed
-    passed INTEGER,
-    failed INTEGER,
-    total INTEGER,
-    score FLOAT,  -- percentage 0-100
-    error_message TEXT,
-    started_at DATETIME,
-    completed_at DATETIME
-)
-
-TABLE eval_results (
-    id INTEGER PRIMARY KEY,
-    run_id INTEGER REFERENCES eval_runs(id),
-    case_id INTEGER REFERENCES eval_cases(id),
-    passed BOOLEAN,
-    actual_output TEXT,
-    judgment TEXT,
-    reasoning TEXT,
-    error_message TEXT,
-    execution_time_ms INTEGER,
-    created_at DATETIME
-)
-
-TABLE settings (
-    key VARCHAR(255) PRIMARY KEY,
-    value TEXT
-)
-"""
-
-        prompt = f"""You are a SQL query generator. Convert the user's natural language query into a SQLite SELECT query.
-
-{schema_description}
-
-Rules:
-1. ONLY generate SELECT queries. Never generate INSERT, UPDATE, DELETE, DROP, or any other modifying queries.
-2. Return ONLY the SQL query, no explanations.
-3. Use proper SQLite syntax.
-4. Limit results to 100 rows maximum unless the user specifies otherwise.
-5. For recent/latest queries, order by appropriate datetime columns DESC.
-
-User query: {data.query}
-
-SQL query:"""
-
-        try:
-            client = LLMClient(model=model)
-            response = client.generate(prompt)
-            sql = response.strip()
-
-            # Clean up the SQL (remove markdown code blocks if present)
-            if sql.startswith("```sql"):
-                sql = sql[6:]
-            elif sql.startswith("```"):
-                sql = sql[3:]
-            if sql.endswith("```"):
-                sql = sql[:-3]
-            sql = sql.strip()
-
-            # Safety check: only allow SELECT queries
-            sql_upper = sql.upper().strip()
-            if not sql_upper.startswith("SELECT"):
-                return {
-                    "success": False,
-                    "error": "Only SELECT queries are allowed",
-                    "sql": sql,
-                    "results": []
-                }
-
-            # Execute the query
-            result = db.execute(text(sql))
-            columns = list(result.keys())
-            rows = [dict(zip(columns, row)) for row in result.fetchall()]
-
-            return {
-                "success": True,
-                "sql": sql,
-                "columns": columns,
-                "results": rows
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-                "sql": sql if 'sql' in dir() else None,
-                "results": []
-            }
+    @app.get("/api/files/{filename}")
+    def get_file(filename: str):
+        """Get a file."""
+        path = storage.get_file_path(filename)
+        if not path:
+            raise HTTPException(status_code=404, detail="File not found")
+        return FileResponse(path)
 
     # Serve static files
     if STATIC_DIR.exists():

@@ -40,7 +40,7 @@ def _maybe_exec_in_docker():
 
 
 @click.group()
-@click.version_option(version="0.1.2")
+@click.version_option(version="0.2.0")
 def main():
     """
     \b
@@ -105,8 +105,12 @@ def init(use_docker: bool, use_local: bool):
         else:
             service = None
 
-    # Create the evals directory
+    # Create the evals directory and subdirectories
     evals_dir.mkdir()
+    (evals_dir / "datasets").mkdir()
+    (evals_dir / "baselines").mkdir()
+    (evals_dir / "runs").mkdir()
+    (evals_dir / "files").mkdir()
 
     # Save configuration
     config = BobaConfig(runtime=runtime, service=service)
@@ -128,12 +132,24 @@ def init(use_docker: bool, use_local: bool):
         (evals_dir / "setup.py").write_text("# Setup file - see boba docs\ndef get_context():\n    return {}\n\ndef cleanup():\n    pass\n")
         (evals_dir / "test_chat.py").write_text("# Eval file - see boba docs\nfrom simboba import Boba\n\nboba = Boba()\n")
 
-    # Add .gitignore for database
-    (evals_dir / ".gitignore").write_text("# boba database\n*.db\n")
+    # Create settings.json with defaults
+    import json
+    settings = {"model": "anthropic/claude-haiku-4-5-20251001"}
+    (evals_dir / "settings.json").write_text(json.dumps(settings, indent=2))
+
+    # Add .gitignore for runs folder
+    gitignore_content = """# Boba eval runs (ephemeral, not committed)
+runs/
+"""
+    (evals_dir / ".gitignore").write_text(gitignore_content)
 
     # Success message
     click.echo("")
     click.echo(click.style("Created boba-evals/ folder", fg="green"))
+    click.echo("  - datasets/      (your eval datasets)")
+    click.echo("  - baselines/     (committed run results)")
+    click.echo("  - runs/          (ephemeral run history)")
+    click.echo("  - files/         (uploaded attachments)")
     click.echo("  - setup.py       (shared test fixtures)")
     click.echo("  - test_chat.py   (example eval script)")
     click.echo("")
@@ -158,10 +174,12 @@ def init(use_docker: bool, use_local: bool):
 @click.option("--reload", is_flag=True, help="Enable auto-reload for development")
 def serve(host: str, port: int, reload: bool):
     """Start the web UI server."""
-    from simboba.database import init_db
+    from simboba.config import find_boba_evals_dir
 
-    # Initialize database
-    init_db()
+    # Check boba-evals exists
+    if not find_boba_evals_dir():
+        click.echo("No boba-evals/ folder found. Run 'boba init' first.", err=True)
+        raise SystemExit(1)
 
     click.echo(f"Starting server at http://{host}:{port}")
     click.echo("Press Ctrl+C to stop")
@@ -399,26 +417,23 @@ def run(script: str):
 @main.command()
 def datasets():
     """List all datasets."""
-    from simboba.database import init_db, get_session_factory
-    from simboba.models import Dataset
+    from simboba import storage
+    from simboba.config import find_boba_evals_dir
 
-    init_db()
-    Session = get_session_factory()
-    db = Session()
+    if not find_boba_evals_dir():
+        click.echo("No boba-evals/ folder found. Run 'boba init' first.", err=True)
+        raise SystemExit(1)
 
-    try:
-        all_datasets = db.query(Dataset).order_by(Dataset.name).all()
-        if not all_datasets:
-            click.echo("No datasets found. Run 'boba generate' to create one.")
-            return
+    all_datasets = storage.list_datasets()
+    if not all_datasets:
+        click.echo("No datasets found. Run 'boba generate' to create one.")
+        return
 
-        click.echo(f"{'Name':<30} {'Cases':<10} {'Description'}")
-        click.echo("-" * 70)
-        for ds in all_datasets:
-            desc = (ds.description or "")[:30]
-            click.echo(f"{ds.name:<30} {len(ds.cases):<10} {desc}")
-    finally:
-        db.close()
+    click.echo(f"{'Name':<30} {'Cases':<10} {'Description'}")
+    click.echo("-" * 70)
+    for ds in all_datasets:
+        desc = (ds.get("description") or "")[:30]
+        click.echo(f"{ds['name']:<30} {ds.get('case_count', 0):<10} {desc}")
 
 
 @main.command()
@@ -428,105 +443,211 @@ def generate(description: str):
 
     Example: boba generate "A customer support chatbot for an e-commerce site"
     """
-    from simboba.database import init_db, get_session_factory
-    from simboba.models import Dataset, EvalCase, Settings
-    from simboba.utils.models import LLMClient
+    from simboba import storage
+    from simboba.config import find_boba_evals_dir
+    from simboba.utils import LLMClient
     from simboba.prompts import build_dataset_generation_prompt
 
-    init_db()
-    Session = get_session_factory()
-    db = Session()
+    if not find_boba_evals_dir():
+        click.echo("No boba-evals/ folder found. Run 'boba init' first.", err=True)
+        raise SystemExit(1)
+
+    # Get model from settings
+    model = storage.get_setting("model")
+    click.echo(f"Using model: {model}")
+    click.echo("Generating dataset...")
+
+    # Generate the dataset
+    prompt = build_dataset_generation_prompt(description)
+    client = LLMClient(model=model)
 
     try:
-        # Get model from settings
-        model = Settings.get(db, "model")
-        click.echo(f"Using model: {model}")
-        click.echo("Generating dataset...")
+        response = client.generate(prompt)
+        result = client.parse_json_response(response)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
 
-        # Generate the dataset
-        prompt = build_dataset_generation_prompt(description)
-        client = LLMClient(model=model)
+    # Validate response
+    if not isinstance(result, dict) or not result.get("name") or not result.get("cases"):
+        click.echo("Error: Invalid response from LLM", err=True)
+        raise SystemExit(1)
 
-        try:
-            response = client.generate(prompt)
-            result = client.parse_json_response(response)
-        except Exception as e:
-            click.echo(f"Error: {e}", err=True)
-            raise SystemExit(1)
+    # Handle duplicate names
+    name = result["name"]
+    if storage.dataset_exists(name):
+        i = 1
+        while storage.dataset_exists(f"{name}-{i}"):
+            i += 1
+        name = f"{name}-{i}"
 
-        # Validate response
-        if not isinstance(result, dict) or not result.get("name") or not result.get("cases"):
-            click.echo("Error: Invalid response from LLM", err=True)
-            raise SystemExit(1)
+    # Create the dataset
+    dataset = {
+        "name": name,
+        "description": result.get("description", ""),
+        "cases": result.get("cases", []),
+    }
+    storage.save_dataset(dataset)
 
-        # Handle duplicate names
-        name = result["name"]
-        existing = db.query(Dataset).filter(Dataset.name == name).first()
-        if existing:
-            i = 1
-            while db.query(Dataset).filter(Dataset.name == f"{name}-{i}").first():
-                i += 1
-            name = f"{name}-{i}"
+    click.echo("")
+    click.echo(click.style(f"Created dataset: {name}", fg="green"))
+    click.echo(f"Description: {dataset['description']}")
+    click.echo(f"Cases: {len(dataset['cases'])}")
+    click.echo("")
+    click.echo("Test cases:")
+    for i, case_data in enumerate(dataset["cases"], 1):
+        case_name = case_data.get("name", f"Case {i}")
+        click.echo(f"  {i}. {case_name}")
 
-        # Create the dataset
-        ds = Dataset(name=name, description=result.get("description", ""))
-        db.add(ds)
-        db.flush()
+    click.echo("")
+    click.echo("Next: Update boba-evals/test_chat.py to use this dataset:")
+    click.echo(f'  boba.run(agent, dataset="{name}")')
 
-        # Create the cases
-        for case_data in result["cases"]:
-            case = EvalCase(
-                dataset_id=ds.id,
-                name=case_data.get("name"),
-                inputs=case_data.get("inputs", []),
-                expected_outcome=case_data.get("expected_outcome", ""),
-                expected_source=case_data.get("expected_source"),
-            )
-            db.add(case)
 
-        db.commit()
+@main.command()
+def baseline():
+    """Save a run as baseline for regression detection.
+
+    Shows recent runs and lets you select one to save as the baseline.
+    The baseline will be committed to git for tracking.
+    """
+    from simboba import storage
+    from simboba.config import find_boba_evals_dir
+
+    if not find_boba_evals_dir():
+        click.echo("No boba-evals/ folder found. Run 'boba init' first.", err=True)
+        raise SystemExit(1)
+
+    # Get all runs
+    runs = storage.list_runs()
+    if not runs:
+        click.echo("No runs found. Run 'boba run' first to create some runs.")
+        return
+
+    # Group by dataset ID, enrich with dataset name
+    runs_by_dataset = {}
+    for run in runs:
+        ds_id = run.get("dataset_id", "_unknown")
+        if ds_id not in runs_by_dataset:
+            # Look up dataset name
+            if ds_id == "_adhoc":
+                ds_name = "_adhoc"
+            else:
+                ds = storage.get_dataset_by_id(ds_id)
+                ds_name = ds["name"] if ds else f"(deleted: {ds_id[:8]})"
+            runs_by_dataset[ds_id] = {"name": ds_name, "runs": []}
+        runs_by_dataset[ds_id]["runs"].append(run)
+
+    # Display runs
+    click.echo("")
+    click.echo(click.style("Recent runs:", bold=True))
+    click.echo("")
+
+    all_runs = []
+    idx = 1
+    for dataset_id, ds_info in runs_by_dataset.items():
+        if dataset_id == "_adhoc":
+            continue  # Skip ad-hoc single evals
+
+        dataset_name = ds_info["name"]
+        dataset_runs = ds_info["runs"]
+
+        # Get existing baseline info (by dataset ID)
+        existing_baseline = storage.get_baseline(dataset_id)
+        baseline_info = ""
+        if existing_baseline:
+            baseline_info = click.style(f" (baseline: {existing_baseline.get('source_run', 'unknown')})", fg="bright_black")
+
+        click.echo(click.style(f"  {dataset_name}", fg="cyan") + baseline_info)
+
+        # Show last 3 runs for this dataset
+        for run in dataset_runs[:3]:
+            passed = run.get("passed", 0)
+            failed = run.get("failed", 0)
+            total = run.get("total", 0)
+            score = run.get("score", 0)
+            filename = run.get("filename", "unknown")
+            started_at = run.get("started_at", "")[:16].replace("T", " ")
+
+            status_color = "green" if failed == 0 else "yellow" if passed > failed else "red"
+            status = click.style(f"{passed}/{total}", fg=status_color)
+
+            click.echo(f"    {idx}. [{filename}] {status} ({score:.0f}%) - {started_at}")
+            # Store dataset info with the run for later use
+            run["_dataset_name"] = dataset_name
+            all_runs.append(run)
+            idx += 1
 
         click.echo("")
-        click.echo(click.style(f"Created dataset: {name}", fg="green"))
-        click.echo(f"Description: {ds.description}")
-        click.echo(f"Cases: {len(result['cases'])}")
-        click.echo("")
-        click.echo("Test cases:")
-        for i, case_data in enumerate(result["cases"], 1):
-            case_name = case_data.get("name", f"Case {i}")
-            click.echo(f"  {i}. {case_name}")
 
-        click.echo("")
-        click.echo("Next: Update evals/test_chat.py to use this dataset:")
-        click.echo(f'  boba.run(agent, dataset="{name}")')
+    if not all_runs:
+        click.echo("No dataset runs found. Run 'boba run' with a dataset first.")
+        return
 
-    finally:
-        db.close()
+    # Prompt for selection
+    selection = click.prompt(
+        "Select a run to save as baseline (enter number)",
+        type=click.IntRange(1, len(all_runs)),
+    )
+
+    selected_run = all_runs[selection - 1]
+    dataset_id = selected_run["dataset_id"]
+    dataset_name = selected_run.get("_dataset_name", dataset_id)
+    filename = selected_run["filename"]
+
+    # Create baseline from run
+    new_baseline = {
+        "source_run": filename,
+        "dataset_name": dataset_name,  # For display purposes
+        "passed": selected_run.get("passed", 0),
+        "failed": selected_run.get("failed", 0),
+        "total": selected_run.get("total", 0),
+        "score": selected_run.get("score"),
+        "results": selected_run.get("results", {}),
+    }
+
+    # Save baseline using dataset ID (survives renames)
+    storage.save_baseline(dataset_id, new_baseline)
+
+    click.echo("")
+    click.echo(click.style(f"Saved baseline for '{dataset_name}'", fg="green"))
+    click.echo(f"  Source run: {filename}")
+    click.echo(f"  Results: {new_baseline['passed']}/{new_baseline['total']} passed")
+    click.echo("")
+    click.echo("The baseline is saved to:")
+    click.echo(click.style(f"  boba-evals/baselines/{dataset_id}.json", fg="cyan"))
+    click.echo("")
+    click.echo("To commit, run:")
+    click.echo(click.style(f"  git add boba-evals/baselines/{dataset_id}.json", fg="bright_black"))
+    click.echo(click.style("  git commit -m 'Update eval baseline'", fg="bright_black"))
 
 
 @main.command()
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
 def reset(force: bool):
-    """Reset the database (deletes all data)."""
-    import os
-    from pathlib import Path
-    from simboba.database import DEFAULT_DB_PATH
+    """Clear all run history (keeps datasets and baselines)."""
+    from simboba import storage
+    from simboba.config import find_boba_evals_dir
 
-    db_path = Path(os.environ.get("SIMBOBA_DB_PATH", DEFAULT_DB_PATH))
+    evals_dir = find_boba_evals_dir()
+    if not evals_dir:
+        click.echo("No boba-evals/ folder found. Nothing to reset.")
+        return
 
-    if not db_path.exists():
-        click.echo("No database file found. Nothing to reset.")
+    runs_dir = evals_dir / "runs"
+    if not runs_dir.exists() or not any(runs_dir.iterdir()):
+        click.echo("No runs found. Nothing to reset.")
         return
 
     if not force:
-        click.echo(f"This will delete: {db_path}")
-        click.echo("All datasets, cases, and eval runs will be permanently removed.")
+        click.echo("This will delete all run history from boba-evals/runs/")
+        click.echo("Datasets and baselines will be preserved.")
         if not click.confirm("Are you sure?"):
             click.echo("Aborted.")
             return
 
-    db_path.unlink()
-    click.echo("Database reset successfully.")
+    count = storage.clear_runs()
+    click.echo(f"Deleted {count} run(s).")
 
 
 if __name__ == "__main__":

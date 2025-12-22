@@ -2,7 +2,7 @@
 
 from typing import Tuple, Optional
 
-from simboba.utils.models import LLMClient
+from simboba.utils import LLMClient
 from simboba.prompts import build_judge_prompt
 
 

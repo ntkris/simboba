@@ -2,50 +2,39 @@
 
 import os
 import pytest
+from pathlib import Path
+from dotenv import load_dotenv
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import sessionmaker
 
-from simboba.database import create_db_engine, Base
-from simboba.server import create_app, get_db
+from simboba.server import create_app
+from simboba import storage
 
-
-@pytest.fixture
-def db_path(tmp_path):
-    """Create a temporary database file."""
-    return tmp_path / "test.db"
+# Load .env file for API keys
+load_dotenv()
 
 
 @pytest.fixture
-def client(db_path):
-    """Create a test client with isolated database.
+def evals_dir(tmp_path):
+    """Create a temporary boba-evals directory."""
+    evals = tmp_path / "boba-evals"
+    evals.mkdir()
+    (evals / "datasets").mkdir()
+    (evals / "baselines").mkdir()
+    (evals / "runs").mkdir()
+    (evals / "files").mkdir()
+    return evals
 
-    Also sets SIMBOBA_DB_PATH so that the Boba class uses the same database.
+
+@pytest.fixture
+def client(evals_dir, monkeypatch):
+    """Create a test client with isolated storage.
+
+    Monkeypatches the storage module to use the temp directory.
     """
-    # Set environment variable so Boba class uses the same database
-    old_db_path = os.environ.get("SIMBOBA_DB_PATH")
-    os.environ["SIMBOBA_DB_PATH"] = str(db_path)
-
-    engine = create_db_engine(db_path)
-    Base.metadata.create_all(bind=engine)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-    def override_get_db():
-        db = SessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
+    # Monkeypatch storage.get_evals_dir to return our temp directory
+    monkeypatch.setattr(storage, "get_evals_dir", lambda: evals_dir)
 
     app = create_app()
-    app.dependency_overrides[get_db] = override_get_db
 
     with TestClient(app) as test_client:
         yield test_client
-
-    engine.dispose()
-
-    # Restore original environment
-    if old_db_path is not None:
-        os.environ["SIMBOBA_DB_PATH"] = old_db_path
-    else:
-        del os.environ["SIMBOBA_DB_PATH"]

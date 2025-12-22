@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "simboba"
-version = "0.1.2"
+version = "0.2.0"
 description = "A lightweight tool for generating annotated eval datasets and running LLM-as-judge evaluations"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,7 +29,6 @@ classifiers = [
 dependencies = [
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
-    "sqlalchemy>=2.0.0",
     "pydantic>=2.0.0",
     "click>=8.0.0",
     "litellm>=1.0.0",

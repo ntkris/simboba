@@ -1,6 +1,6 @@
 # simboba
 
-Lightweight eval tracking with LLM-as-judge. Users write Python scripts to run evals, results are tracked in SQLite and viewable in a web UI.
+Lightweight eval tracking with LLM-as-judge. Users write Python scripts to run evals, results are stored as JSON files (git-trackable) and viewable in a web UI.
 
 ## Quick Start
 
@@ -9,6 +9,7 @@ pip install -e .
 boba init        # Create boba-evals/ folder
 boba magic       # Print AI prompt to configure evals
 boba run         # Run evals (handles Docker automatically)
+boba baseline    # Save run as baseline for regression detection
 boba serve       # View results
 ```
 
@@ -19,10 +20,10 @@ simboba/
 ├── simboba/
 │   ├── __init__.py       # Exports Boba class
 │   ├── boba.py           # Core Boba class (eval, run methods)
-│   ├── cli.py            # Click CLI (init, setup, serve, datasets, generate, reset)
+│   ├── cli.py            # Click CLI (init, magic, generate, run, baseline, serve, datasets, reset)
 │   ├── config.py         # Configuration (.boba.yaml) and Docker exec
-│   ├── database.py       # SQLite/SQLAlchemy setup
-│   ├── models.py         # Dataset, EvalCase, EvalRun, EvalResult, Settings
+│   ├── storage.py        # JSON file storage operations
+│   ├── schemas.py        # Pydantic models for validation
 │   ├── server.py         # FastAPI REST API
 │   ├── judge.py          # LLM judge implementation
 │   ├── prompts/          # LLM prompts for generation and judging
@@ -35,6 +36,24 @@ simboba/
 │   ├── conftest.py       # Pytest fixtures
 │   └── test_core_flows.py
 └── pyproject.toml
+```
+
+## Data Storage
+
+All data is stored as JSON files in the `boba-evals/` directory:
+
+```
+boba-evals/
+├── datasets/
+│   └── {name}.json           # Dataset + all cases (git tracked)
+├── baselines/
+│   └── {name}.json           # Committed run results (git tracked)
+├── runs/
+│   └── {dataset}/
+│       └── {timestamp}.json  # All runs (gitignored)
+├── files/                    # Uploaded attachments (git tracked)
+├── settings.json             # App settings
+└── .gitignore                # Ignores runs/
 ```
 
 ## Architecture
@@ -52,27 +71,29 @@ result = boba.eval(
     output="Hi there!",
     expected="Should greet the user",
 )
-# Returns: {"passed": bool, "reasoning": str, "run_id": int}
+# Returns: {"passed": bool, "reasoning": str, "run_id": str}
 
 # Dataset eval - runs agent against all cases in a dataset
 result = boba.run(
     agent=my_agent_fn,  # Callable[[str], str]
     dataset="my-dataset",
 )
-# Returns: {"passed": int, "failed": int, "total": int, "score": float, "run_id": int}
+# Returns: {"passed": int, "failed": int, "total": int, "score": float, "run_id": str, "regressions": list, "fixes": list}
 ```
 
 ### Data Model
 
-- **Dataset**: Named collection of eval cases
-- **EvalCase**: Test case with inputs, expected outcome, optional source reference
-- **EvalRun**: One execution (from `boba.eval()` or `boba.run()`)
-- **EvalResult**: Per-case result with actual output, judgment, reasoning
+- **Dataset**: Named collection of eval cases (JSON file)
+- **Case**: Test case with inputs, expected outcome, optional source reference
+- **Run**: One execution with results (JSON file per run)
+- **Baseline**: Committed run results for regression detection
 
-### EvalCase Structure
+### Case Structure
 
 ```python
 {
+    "id": "abc123",  # Stable ID for baseline comparison
+    "name": "Test greeting",
     "inputs": [
         {"role": "user", "message": "...", "attachments": [{"file": "doc.pdf"}]}
     ],
@@ -89,36 +110,50 @@ result = boba.run(
 
 | Command | Description |
 |---------|-------------|
-| `boba init` | Create `boba-evals/` folder with templates |
+| `boba init` | Create `boba-evals/` folder with datasets/, baselines/, runs/, files/ |
 | `boba init --docker` | Quick setup for Docker Compose |
 | `boba init --local` | Quick setup for local Python |
 | `boba magic` | Print detailed AI prompt to configure eval scripts |
-| `boba setup` | Print basic setup instructions |
 | `boba run [script]` | Run eval script (default: `test_chat.py`). Handles Docker automatically |
+| `boba baseline` | Interactive - list recent runs, select one to save as baseline |
 | `boba serve` | Start web UI at localhost:8787 |
 | `boba datasets` | List all datasets |
 | `boba generate "desc"` | Generate dataset from description |
-| `boba reset` | Delete database |
+| `boba reset` | Clear run history (keeps datasets and baselines) |
 
 ### API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/datasets` | GET, POST | List/create datasets |
-| `/api/datasets/{id}` | GET, DELETE | Get/delete dataset |
-| `/api/datasets/{id}/export` | GET | Export dataset as JSON |
+| `/api/datasets/{name}` | GET, PUT, DELETE | CRUD for dataset |
+| `/api/datasets/{name}/export` | GET | Export dataset as JSON |
 | `/api/datasets/import` | POST | Import dataset from JSON |
 | `/api/cases` | GET, POST | List/create cases |
-| `/api/cases/{id}` | GET, PUT, DELETE | CRUD for single case |
+| `/api/cases/{dataset}/{id}` | GET, PUT, DELETE | CRUD for single case |
 | `/api/cases/bulk` | POST | Bulk create cases |
 | `/api/generate` | POST | Generate synthetic cases |
 | `/api/generate/with-files` | POST | Generate from PDF files |
 | `/api/generate/accept` | POST | Accept generated cases |
 | `/api/runs` | GET | List runs |
-| `/api/runs/{id}` | GET, DELETE | Get/delete run |
+| `/api/runs/{dataset}/{filename}` | GET, DELETE | Get/delete run |
+| `/api/baselines` | GET | List baselines |
+| `/api/baselines/{dataset}` | GET | Get baseline for dataset |
 | `/api/settings` | GET, PUT | Get/update settings |
+| `/api/files/upload` | POST | Upload file |
+| `/api/files/{filename}` | GET | Get file |
 
-Note: Runs are created by the Boba class in Python scripts, not via API.
+### Regression Detection
+
+After running evals, the system compares results to the baseline:
+
+- **Regression**: Case was passing in baseline, now failing
+- **Fix**: Case was failing in baseline, now passing
+
+Workflow:
+1. `boba run` - Execute evals, compare to baseline, report regressions
+2. `boba baseline` - Save current run as new baseline
+3. Commit baseline to git for tracking
 
 ### Docker Integration
 
@@ -134,6 +169,12 @@ Set `BOBA_NO_DOCKER=1` to bypass.
 
 ## Development
 
+### Code Style
+
+- **Imports**: All imports must be at the top of the file, not inline within functions
+- **Type hints**: Use type hints for function signatures
+- **Docstrings**: Use docstrings for public functions and classes
+
 ### Running Tests
 
 ```bash
@@ -146,6 +187,8 @@ pytest tests/ -v
 - `TestDatasetManagement`: Dataset CRUD
 - `TestCaseManagement`: Case CRUD
 - `TestRunsAPI`: List/delete runs
+- `TestBaselines`: Baseline endpoints
+- `TestSettings`: Settings endpoints
 - `TestJudge`: Simple keyword judge
 - `TestUIServing`: Health, index endpoints
 
@@ -156,19 +199,21 @@ pytest tests/ -v
 | Change Boba API | `boba.py`, `__init__.py` |
 | Add CLI command | `cli.py` |
 | Add API endpoint | `server.py` |
-| Change data model | `models.py`, `database.py` |
+| Change data model | `storage.py`, `schemas.py` |
 | Update templates | `samples/setup.py`, `samples/test_chat.py` |
 | Change judging | `judge.py`, `prompts/judge.py` |
 | Update UI | `static/index.html`, `static/app.js` |
 
 ### Adding New Features
 
-1. Update model in `models.py` if needed
-2. Add API endpoint in `server.py`
-3. Update `boba.py` if it affects the Python API
-4. Update UI in `static/app.js`
-5. Add tests in `test_core_flows.py`
-6. Update README.md and CLAUDE.md
+1. Update schemas in `schemas.py` if needed
+2. Add storage operations in `storage.py`
+3. Add API endpoint in `server.py`
+4. Update `boba.py` if it affects the Python API
+5. Update CLI in `cli.py` if needed
+6. Update UI in `static/app.js`
+7. Add tests in `test_core_flows.py`
+8. Update README.md and CLAUDE.md
 
 ## Design System
 

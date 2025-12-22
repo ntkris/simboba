@@ -3,21 +3,23 @@
 Run with: pytest tests/test_llm.py -v
 """
 
-from simboba.database import init_db, get_session_factory
-from simboba.models import Settings
-from simboba.utils.models import LLMClient
+from simboba import storage
+from simboba.utils import LLMClient
 
 
-def test_llm_connection():
+def test_llm_connection(tmp_path, monkeypatch):
     """Test that LLM API calls work with the configured model."""
-    init_db()
-    Session = get_session_factory()
-    db = Session()
+    # Set up temp storage
+    evals_dir = tmp_path / "boba-evals"
+    evals_dir.mkdir()
+    (evals_dir / "datasets").mkdir()
+    (evals_dir / "baselines").mkdir()
+    (evals_dir / "runs").mkdir()
+    (evals_dir / "files").mkdir()
 
-    try:
-        model = Settings.get(db, "model") or LLMClient.DEFAULT_MODEL
-    finally:
-        db.close()
+    monkeypatch.setattr(storage, "get_evals_dir", lambda: evals_dir)
+
+    model = storage.get_setting("model") or LLMClient.DEFAULT_MODEL
 
     print(f"\nTesting model: {model}")
 

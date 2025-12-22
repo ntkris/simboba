@@ -45,3 +45,6 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Local testing
+boba-evals/
+
