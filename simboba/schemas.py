@@ -89,6 +89,9 @@ class ResultCreate(BaseModel):
     reasoning: Optional[str] = None
     error_message: Optional[str] = None
     execution_time_ms: Optional[int] = None
+    expected_metadata: Optional[dict] = None
+    actual_metadata: Optional[dict] = None
+    metadata_passed: Optional[bool] = None
 
 
 class Result(BaseModel):
@@ -100,6 +103,9 @@ class Result(BaseModel):
     reasoning: Optional[str] = None
     error_message: Optional[str] = None
     execution_time_ms: Optional[int] = None
+    expected_metadata: Optional[dict] = None
+    actual_metadata: Optional[dict] = None
+    metadata_passed: Optional[bool] = None  # None if no checker, True/False if checked
     created_at: str
     case: Optional[dict] = None
 

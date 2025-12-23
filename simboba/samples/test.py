@@ -2,9 +2,8 @@
 Eval: Test your agent against a dataset.
 
 USAGE:
-    boba run                    # Run with metadata comparison
-    boba run --no-metadata      # Run without metadata comparison
-    boba serve                  # View results in UI
+    boba run          # Run evals
+    boba serve        # View results in UI
 """
 
 from simboba import Boba
@@ -65,7 +64,6 @@ def agent(message: str) -> str:
 if __name__ == "__main__":
     try:
         print(f"Running evals against dataset: {DATASET}")
-        print(f"Metadata comparison: {'disabled' if boba._skip_metadata else 'enabled'}")
         print("")
 
         result = boba.run(agent, dataset=DATASET)

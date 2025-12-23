@@ -88,7 +88,42 @@ result = boba.run(
     dataset="my-dataset",
 )
 # Returns: {"passed": int, "failed": int, "total": int, "score": float, "run_id": str, "regressions": list, "fixes": list}
+
+# With deterministic metadata checking
+def check_citations(expected, actual):
+    return expected.get("citations") == actual.get("citations")
+
+result = boba.eval(
+    input="What's in section 3?",
+    output="Section 3 covers...",
+    expected="Should cite the document",
+    expected_metadata={"citations": [{"file": "doc.pdf", "page": 3}]},
+    actual_metadata={"citations": [{"file": "doc.pdf", "page": 3}]},
+    metadata_checker=check_citations,  # Deterministic check instead of LLM
+)
 ```
+
+### Metadata Checking
+
+Three modes for evaluating metadata (citations, tool_calls, etc.):
+
+| Mode | How | Behavior |
+|------|-----|----------|
+| 1. No metadata | Don't pass `expected_metadata`/`actual_metadata` | LLM judges output only |
+| 2. LLM evaluation | Pass metadata, no `metadata_checker` | LLM judges output + metadata together |
+| 3. LLM + deterministic | Pass metadata AND `metadata_checker` | LLM judges + your function checks metadata |
+
+```python
+# metadata_checker signature
+def checker(expected_metadata: dict | None, actual_metadata: dict | None) -> bool:
+    """Return True if metadata matches expectations."""
+```
+
+When `metadata_checker` is provided:
+- LLM still sees metadata for context/reasoning
+- Your function runs as an additional gate
+- Case passes only if **both** checks pass
+- Results include `expected_metadata`, `actual_metadata`, and `metadata_passed` fields
 
 ### Data Model
 

@@ -13,28 +13,21 @@ Usage:
     boba.run(agent_fn, dataset="my-dataset")
 """
 
-import os
 from datetime import datetime
 from typing import Callable, Optional
 
 from simboba import storage
 
+# Type alias for metadata checker function
+MetadataChecker = Callable[[Optional[dict], Optional[dict]], bool]
+
 
 class Boba:
     """Simple eval tracking."""
 
-    def __init__(self, skip_metadata: bool = None):
-        """Initialize Boba.
-
-        Args:
-            skip_metadata: If True, don't pass metadata to judge.
-                          Defaults to BOBA_SKIP_METADATA env var.
-        """
+    def __init__(self):
+        """Initialize Boba."""
         self._warned_simple_judge = False
-        # Check env var if not explicitly set
-        if skip_metadata is None:
-            skip_metadata = os.environ.get("BOBA_SKIP_METADATA", "").lower() in ("1", "true", "yes")
-        self._skip_metadata = skip_metadata
 
     def _get_judge(self, warn: bool = True):
         """Get the judge function.
@@ -69,6 +62,7 @@ class Boba:
         name: Optional[str] = None,
         expected_metadata: Optional[dict] = None,
         actual_metadata: Optional[dict] = None,
+        metadata_checker: Optional[MetadataChecker] = None,
     ) -> dict:
         """
         Evaluate a single input/output pair.
@@ -80,6 +74,9 @@ class Boba:
             name: Optional name for this eval
             expected_metadata: Expected metadata (citations, tool_calls, etc.)
             actual_metadata: Actual metadata from the agent response
+            metadata_checker: Optional function(expected, actual) -> bool for
+                            deterministic metadata checking. If not provided,
+                            metadata is passed to the LLM judge.
 
         Returns:
             dict with: passed, reasoning, run_id
@@ -97,14 +94,22 @@ class Boba:
             "results": {},
         }
 
-        # Judge the result
+        # Judge the output (always pass metadata to LLM when provided)
         judge_fn = self._get_judge()
         inputs = [{"role": "user", "message": input}]
-        passed, reasoning = judge_fn(
+        output_passed, reasoning = judge_fn(
             inputs, expected, output,
-            expected_metadata=None if self._skip_metadata else expected_metadata,
-            actual_metadata=None if self._skip_metadata else actual_metadata,
+            expected_metadata=expected_metadata,
+            actual_metadata=actual_metadata,
         )
+
+        # If metadata_checker provided, run deterministic check as additional gate
+        if metadata_checker is not None:
+            metadata_passed = metadata_checker(expected_metadata, actual_metadata)
+            passed = output_passed and metadata_passed
+        else:
+            metadata_passed = None
+            passed = output_passed
 
         # Create result
         case_id = storage.generate_id()
@@ -116,6 +121,9 @@ class Boba:
             "actual_output": output,
             "judgment": "PASS" if passed else "FAIL",
             "reasoning": reasoning,
+            "expected_metadata": expected_metadata,
+            "actual_metadata": actual_metadata,
+            "metadata_passed": metadata_passed,
             "created_at": datetime.now().isoformat(),
         }
 
@@ -140,6 +148,7 @@ class Boba:
         agent: Callable[[str], str],
         dataset: str,
         name: Optional[str] = None,
+        metadata_checker: Optional[MetadataChecker] = None,
     ) -> dict:
         """
         Run an agent against a dataset.
@@ -148,6 +157,9 @@ class Boba:
             agent: Function that takes a message string and returns a response string
             dataset: Name of the dataset to run against
             name: Optional name for this run
+            metadata_checker: Optional function(expected, actual) -> bool for
+                            deterministic metadata checking. If not provided,
+                            metadata is passed to the LLM judge.
 
         Returns:
             dict with: passed, failed, total, score, run_id, regressions, fixes
@@ -206,17 +218,30 @@ class Boba:
                 error_message = str(e)
 
             # Judge if no error
+            expected_metadata = case.get("expected_metadata")
+            actual_metadata = None  # TODO: agent could return metadata in future
+
             if error_message:
                 passed = False
                 reasoning = f"Error: {error_message}"
+                metadata_passed = None
             else:
-                expected_metadata = None if self._skip_metadata else case.get("expected_metadata")
-                passed, reasoning = judge_fn(
+                # Always pass metadata to LLM when provided
+                output_passed, reasoning = judge_fn(
                     inputs,
                     case.get("expected_outcome", ""),
                     output,
                     expected_metadata=expected_metadata,
+                    actual_metadata=actual_metadata,
                 )
+
+                # If metadata_checker provided, run deterministic check as additional gate
+                if metadata_checker is not None:
+                    metadata_passed = metadata_checker(expected_metadata, actual_metadata)
+                    passed = output_passed and metadata_passed
+                else:
+                    metadata_passed = None
+                    passed = output_passed
 
             # Create result
             run["results"][case_id] = {
@@ -226,6 +251,9 @@ class Boba:
                 "judgment": "PASS" if passed else "FAIL",
                 "reasoning": reasoning,
                 "error_message": error_message,
+                "expected_metadata": expected_metadata,
+                "actual_metadata": actual_metadata,
+                "metadata_passed": metadata_passed,
                 "created_at": datetime.now().isoformat(),
                 "case": {
                     "id": case_id,

@@ -79,6 +79,45 @@ if __name__ == "__main__":
         cleanup()
 ```
 
+## Metadata Checking
+
+Metadata (citations, tool_calls, etc.) is always passed to the LLM judge when provided. For strict deterministic checks, add a `metadata_checker` function:
+
+```python
+# Mode 1: No metadata - LLM judges output only
+boba.eval(input="Hello", output="Hi!", expected="Should greet")
+
+# Mode 2: LLM evaluates output + metadata together
+boba.eval(
+    input="What's my order status?",
+    output="Your order #123 is shipped.",
+    expected="Should look up order status",
+    expected_metadata={"tool_calls": ["get_orders"]},
+    actual_metadata={"tool_calls": ["get_orders"]},
+)
+
+# Mode 3: LLM evaluates + deterministic check (both must pass)
+def check_tool_calls(expected, actual):
+    expected_tools = set(expected.get("tool_calls", []))
+    actual_tools = set(actual.get("tool_calls", []))
+    return expected_tools == actual_tools
+
+boba.eval(
+    input="What's my order status?",
+    output="Your order #123 is shipped.",
+    expected="Should look up order status",
+    expected_metadata={"tool_calls": ["get_orders"]},
+    actual_metadata={"tool_calls": ["get_orders"]},
+    metadata_checker=check_tool_calls,  # Additional deterministic gate
+)
+```
+
+When using `metadata_checker`:
+- LLM still sees metadata for context/reasoning
+- Your function runs as an additional gate
+- Case passes only if **both** LLM judgment and metadata check pass
+- Results include `metadata_passed` field for visibility
+
 ## Regression Detection
 
 Track regressions across code changes:

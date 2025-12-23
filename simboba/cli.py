@@ -353,8 +353,7 @@ This will execute the eval script and track results. Then run `boba serve` to vi
 
 @main.command()
 @click.argument("script", default="test.py")
-@click.option("--no-metadata", is_flag=True, help="Skip metadata comparison in judge (tool_calls, citations)")
-def run(script: str, no_metadata: bool):
+def run(script: str):
     """Run an eval script.
 
     Automatically handles Docker vs local execution based on your config.
@@ -364,11 +363,9 @@ def run(script: str, no_metadata: bool):
         boba run                    # Runs boba-evals/test.py
         boba run test.py            # Same as above
         boba run my_eval.py         # Runs boba-evals/my_eval.py
-        boba run --no-metadata      # Skip metadata comparison
     """
     import subprocess
     import sys
-    import os
     from pathlib import Path
     from simboba.config import load_config, inside_container, find_boba_evals_dir
 
@@ -401,17 +398,10 @@ def run(script: str, no_metadata: bool):
         cmd = ["docker", "compose", "exec", service, "python", relative_script]
 
     click.echo(f"Running: {' '.join(cmd)}")
-    if no_metadata:
-        click.echo("(metadata comparison disabled)")
     click.echo("")
 
-    # Set environment variable for Boba class to read
-    env = os.environ.copy()
-    if no_metadata:
-        env["BOBA_SKIP_METADATA"] = "1"
-
     try:
-        result = subprocess.run(cmd, env=env)
+        result = subprocess.run(cmd)
         sys.exit(result.returncode)
     except FileNotFoundError:
         if "docker" in cmd[0]:
