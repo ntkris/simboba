@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "simboba"
-version = "0.1.6"
+version = "0.1.7"
 description = "A lightweight tool for generating annotated eval datasets and running LLM-as-judge evaluations"
 readme = "README.md"
 requires-python = ">=3.9"
